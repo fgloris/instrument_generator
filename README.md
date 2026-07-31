@@ -1,12 +1,11 @@
-# Lab Asset Agent v0.3.2
+# Lab Asset Agent v0.4.1
 
 一个在本地驱动 Blender 5.2、通过 OpenAI-compatible API 迭代生成实验室仪器 3D 资产的轻量 agent。
 
-新版不再采用“GPT 看图给建议 → DeepSeek 再改代码”的两段式流程。后续每一轮由 GPT-4o 同时读取：
+新版不再采用“GPT 看图给建议 → DeepSeek 再改代码”的两段式流程。后续每一轮由 GPT 迭代模型同时读取：
 
 - 仪器规格；
 - 共享 Blender 工具库；
-- 烧杯参考脚本；
 - Blender/项目文档；
 - **产生本轮渲染图的精确仪器脚本快照**；
 - 多个 Blender 渲染视角。
@@ -20,12 +19,13 @@ GPT 在同一次请求中完成视觉评审，并在需要修改时直接输出�
    ▼
 本地静态检查 → Blender 后台建模与多视角渲染
    ▼
-GPT-4o：规格 + 工具代码 + 当前代码 + 多视角图片
+GPT：规格 + 工具代码 + 当前代码 + 多视角图片
    │
    ├── pass：保存 final
-   └── revise：同一响应直接返回完整下一版脚本
-                         │
-                         └────────→ 下一轮 Blender
+   ├── revise：同一响应直接返回完整下一版脚本
+   └── retake_views：只改摄像机/诊断视角，重新拍一组图片
+                              │
+                              └────────→ 下一轮 Blender
 ```
 
 运行时不依赖 Claude Code、Claude Agent SDK、Qwen3-VL 或 vLLM。
@@ -35,8 +35,16 @@ GPT-4o：规格 + 工具代码 + 当前代码 + 多视角图片
 - **初始模型可比较。** `initial_generator: deepseek` 使用 DeepSeek 生成第一版；改为 `gpt` 时，第一版也由 GPT 生成。
 - **后续只有一个决策模型。** 首轮渲染之后，不再把 GPT 的建议转交给 DeepSeek；GPT 自己看代码、看图并修改代码。
 - **精确代码—图像配对。** GPT 读取 `iteration_N/instrument.py`，即真正产生该轮图片的脚本，不会误用工作区中的其他版本。
-- **跨轮 issue 记忆。** 每次评审产生的 minor / moderate / major / critical issue 都会按时间顺序写入
-  `issue_history.json`，后续看图修订和 Blender 报错修复都会收到完整历史，用于防止旧问题回归。
+- **跨轮 issue 记忆。** 只把 moderate / major / critical issue 按时间顺序写入 `issue_history.json`，
+  后续看图修订和 Blender 报错修复会收到这份可执行问题历史，用于防止旧问题回归。`minor` 只作为
+  旧 manifest 的兼容输入，不会进入新评审结果或后续提示。
+- **评审只允许三个有效角度。** 所有 issue 必须属于 `camera_coverage`、`shape_silhouette` 或
+  `graduations`；其中形态/外轮廓最重要，摄像机覆盖是评审前置门槛。
+- **只返回可执行问题。** 新评审仅允许 `moderate / major / critical`；低优先级的 minor 观察直接省略。
+- **视角不足先重拍。** 若所有图片裁切物体、距离太远导致刻度不可读、关键区域被遮挡，或多个视角
+  过于相似，GPT 必须选择 `retake_views`，只修改摄像机与诊断视角，不能据此猜测部件缺失。
+- **命令行人工提示。** 可通过 `--human-hint` 注入一条人工意见，并用
+  `--human-hint-from-iteration` 指定从哪一轮开始生效；提示会记录在 manifest 中，续跑时默认保留。
 - **只评几何，不评环境光。** 黑暗、反光不明显、透明感弱、曝光和阴影等被视为环境光照现象；只要几何仍可辨认，
   不会因此降分或修改灯光/材质。
 - **无结构化输出兼容问题。** 合并响应使用 `<REVIEW_JSON>` 和 `<BLENDER_SCRIPT>` 标签，不发送 `response_format`。
@@ -198,14 +206,17 @@ Endpoint rejected json_object
 
 ## 6. GPT 实际收到什么
 
+`CLAUDE.md` 只是仓库维护说明，不会发送给运行时 API。`AGENT_RULES.md` 只保存跨阶段共享的脚本合同；
+三轴评审、`retake_views`、光照忽略和 severity 决策只在评审 system prompt 中定义一次。
+
 每轮的文本内容包含：
 
 ```text
 TARGET SPECIFICATION
-PRIOR MODERATE-OR-HIGHER ISSUE HISTORY (REGRESSION MEMORY)
-AGENT RULES
+PRIOR MODERATE-OR-HIGHER ISSUES
+HUMAN GUIDANCE FOR THIS ITERATION
+SCRIPT CONTRACT
 BLENDER/PROJECT DOCUMENTATION
-REFERENCE INSTRUMENT SCRIPT
 SHARED TOOLKIT
 CURRENT EXACT INSTRUMENT SCRIPT THAT PRODUCED THESE IMAGES
 ```
@@ -228,7 +239,16 @@ CURRENT EXACT INSTRUMENT SCRIPT THAT PRODUCED THESE IMAGES
 {
   "verdict": "revise",
   "overall_score": 7.8,
-  "issues": [...],
+  "issues": [
+    {
+      "review_axis": "shape_silhouette",
+      "severity": "major",
+      "view_names": ["view_01.png"],
+      "observation": "器身外轮廓过直",
+      "likely_cause": "外壁剖面控制点不足",
+      "recommended_change": "调整外轮廓剖面并保持内腔容量"
+    }
+  ],
   "preserve": [...],
   "summary": "增大倒液嘴径向延伸，并保持器身比例。"
 }
@@ -240,13 +260,42 @@ CURRENT EXACT INSTRUMENT SCRIPT THAT PRODUCED THESE IMAGES
 
 若通过，则 `verdict=pass`，并省略 `<BLENDER_SCRIPT>`。
 
+若图片本身不足以可靠评审，则：
+
+```text
+<REVIEW_JSON>
+{
+  "verdict": "retake_views",
+  "overall_score": 0,
+  "issues": [
+    {
+      "review_axis": "camera_coverage",
+      "severity": "major",
+      "view_names": ["view_01.png", "view_02.png", "view_03.png"],
+      "observation": "三个视角都裁切了瓶口且角度接近",
+      "likely_cause": "相机目标点与距离设置不合理",
+      "recommended_change": "重设三组不同方位的完整物体视角"
+    }
+  ],
+  "preserve": ["全部几何、材质、刻度计算"],
+  "summary": "只重设诊断相机，不修改资产。"
+}
+</REVIEW_JSON>
+<BLENDER_SCRIPT>
+仅修改摄像机/诊断视角后的完整 Python 文件
+</BLENDER_SCRIPT>
+```
+
+`retake_views` 中只能出现 `camera_coverage` issue，且返回脚本只能修改摄像机位置、目标点、镜头和
+诊断视角定义。
+
 ## 7. 每轮保存内容
 
 ```text
 runs/<run-id>/
 ├── spec.json
 ├── manifest.json
-├── issue_history.json                  # 所有历史 minor 以上问题
+├── issue_history.json                  # 所有历史 moderate / major / critical 问题
 ├── iteration_01/
 │   ├── instrument.py                     # 产生本轮图片的精确脚本
 │   ├── render/
@@ -255,7 +304,7 @@ runs/<run-id>/
 │   │   └── blender.log
 │   ├── review.json
 │   ├── gpt_review_and_code_response.txt  # GPT 原始合并响应
-│   └── next_instrument.py                 # verdict=revise 时的下一版
+│   └── next_instrument.py                 # revise 或 retake_views 的下一版
 ├── iteration_02/
 └── final/
 ```
@@ -280,6 +329,16 @@ lab-asset-agent resume -c config.yaml
 lab-asset-agent resume `
   runs\20260731TxxxxxxxxxxxxZ_beaker_low_form_250ml `
   -c config.yaml
+```
+
+续跑时临时加入人工意见，例如从第 4 轮开始要求重点检查瓶颈比例：
+
+```powershell
+lab-asset-agent resume `
+  runs\20260731TxxxxxxxxxxxxZ_volumetric_flask_250ml `
+  -c config.yaml `
+  --human-hint "瓶颈看起来偏粗，优先核对真实容量瓶的颈身比例" `
+  --human-hint-from-iteration 4
 ```
 
 恢复规则：
@@ -336,7 +395,21 @@ lab-asset-agent batch workspace/specs -c config.yaml
 
 每个 YAML 独立创建 run，顺序执行。
 
-## 11. 安全边界
+## 12. 命令行人工干预
+
+生成时直接加入一条提示：
+
+```powershell
+lab-asset-agent generate workspace/specs/beaker_low_250ml.yaml `
+  -c config.yaml `
+  --human-hint "倒液嘴应更突出，但不要改变杯身直径" `
+  --human-hint-from-iteration 2
+```
+
+含义是：第 1 轮正常评审，从第 2 轮开始，每次 GPT 看图修改或修复 Blender 报错时都会收到这条人工
+提示。没有交互式询问、文件监听或后台控制通道。
+
+## 13. 安全边界
 
 生成脚本在启动 Blender 前会进行 AST 检查，拒绝：
 
@@ -353,10 +426,16 @@ Blender 使用：
 
 这属于防御性限制，不等同于操作系统级沙箱。大规模运行建议使用独立用户、虚拟机或容器。
 
-## 12. 测试
+## 14. 测试
 
+```powershell
+pytest -q
 ```
-cd lab_asset_agent
+
+单独验证参考脚本的 Blender 后台渲染：
+
+```powershell
+$project = (Get-Location).Path
 & "blender.exe" `
   --background `
   --factory-startup `

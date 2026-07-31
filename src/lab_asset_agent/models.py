@@ -160,6 +160,9 @@ class AppConfig(BaseModel):
 
 
 class VisualIssue(BaseModel):
+    review_axis: Literal["camera_coverage", "shape_silhouette", "graduations"] = (
+        "shape_silhouette"
+    )
     severity: Literal["critical", "major", "moderate", "minor"]
     view_names: list[str] = Field(default_factory=list)
     observation: str
@@ -175,7 +178,7 @@ class HistoricalVisualIssue(VisualIssue):
 
 
 class VLMReview(BaseModel):
-    verdict: Literal["pass", "revise"]
+    verdict: Literal["pass", "revise", "retake_views"]
     overall_score: float = Field(ge=0, le=10)
     issues: list[VisualIssue] = Field(default_factory=list)
     preserve: list[str] = Field(default_factory=list)
@@ -210,3 +213,5 @@ class RunManifest(BaseModel):
     final_score: float | None = None
     iterations: list[IterationRecord] = Field(default_factory=list)
     failure_reason: str | None = None
+    human_hint: str | None = None
+    human_hint_from_iteration: int = Field(default=1, ge=1)

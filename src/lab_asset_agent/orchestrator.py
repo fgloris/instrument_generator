@@ -20,11 +20,22 @@ from .vision_coding_agent import VisionCodeDecision, VisionCodingAgent
 
 
 class AssetGenerationOrchestrator:
-    def __init__(self, config: AppConfig, console: Console | None = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        console: Console | None = None,
+        *,
+        human_hint: str | None = None,
+        human_hint_from_iteration: int = 1,
+    ):
+        if human_hint_from_iteration < 1:
+            raise ValueError("human_hint_from_iteration must be at least 1.")
         self.config = config
         self.console = console or Console()
         self.blender = BlenderRunner(config)
         self.iteration_agent = VisionCodingAgent(config)
+        self.human_hint = human_hint.strip() if human_hint and human_hint.strip() else None
+        self.human_hint_from_iteration = human_hint_from_iteration
 
     async def run(self, spec: InstrumentSpec) -> RunManifest:
         """Start a new run.
@@ -40,13 +51,19 @@ class AssetGenerationOrchestrator:
         run_dir.mkdir(parents=True, exist_ok=False)
         candidate_path = self.config.paths.generated_dir / f"{spec.id}.py"
         candidate_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest = RunManifest(run_id=run_id, spec_id=spec.id)
+        manifest = RunManifest(
+            run_id=run_id,
+            spec_id=spec.id,
+            human_hint=self.human_hint,
+            human_hint_from_iteration=self.human_hint_from_iteration,
+        )
         manifest_path = run_dir / "manifest.json"
         write_json(run_dir / "spec.json", spec)
         write_json(manifest_path, manifest)
         write_json(run_dir / "issue_history.json", [])
 
         self.console.print(f"[cyan]Run created[/cyan]: {run_dir}")
+        self._print_human_hint()
         protected = self._snapshot_protected_files()
         initial_writer = CodeWriter(self.config, self.config.models.initial_model)
         initial_started = False
@@ -113,11 +130,21 @@ class AssetGenerationOrchestrator:
             self.console.print(f"[green]Run already passed[/green]: {run_dir}")
             return manifest
 
+        # A newly supplied command-line hint overrides the stored hint. When no
+        # new hint is supplied, resume keeps the original run guidance.
+        if self.human_hint is None:
+            self.human_hint = manifest.human_hint
+            self.human_hint_from_iteration = manifest.human_hint_from_iteration
+        else:
+            manifest.human_hint = self.human_hint
+            manifest.human_hint_from_iteration = self.human_hint_from_iteration
+
         previous_failure = manifest.failure_reason
         manifest.status = "running"
         manifest.failure_reason = None
         write_json(manifest_path, manifest)
         self.console.print(f"[cyan]Resuming run[/cyan]: {run_dir}")
+        self._print_human_hint()
         if previous_failure:
             self.console.print(f"[yellow]Previous interruption[/yellow]: {previous_failure}")
 
@@ -195,6 +222,7 @@ class AssetGenerationOrchestrator:
                         last.render.images,
                         last.iteration,
                         issue_history=self._collect_issue_history(manifest),
+                        human_hint=self._human_hint_for(last.iteration),
                     )
                     self._save_decision(run_dir, manifest, last, decision)
                     self._print_review(decision.review)
@@ -203,7 +231,7 @@ class AssetGenerationOrchestrator:
                         return manifest
                     self.iteration_agent.write_revision(decision, candidate_path)
                     writer_summary = decision.summary
-                    self.console.print("[green]GPT revised script saved[/green].")
+                    self._print_revision_saved(decision)
                     self._restore_protected_files(protected)
                 else:
                     self.console.print(
@@ -216,6 +244,7 @@ class AssetGenerationOrchestrator:
                         last.iteration,
                         last.render.error_summary or "Unknown Blender failure",
                         issue_history=self._collect_issue_history(manifest),
+                        human_hint=self._human_hint_for(last.iteration),
                     )
                     candidate_path.write_text(repair.script.rstrip() + "\n", encoding="utf-8")
                     writer_summary = repair.summary
@@ -332,6 +361,7 @@ class AssetGenerationOrchestrator:
                     iteration,
                     render.error_summary or "Unknown Blender failure",
                     issue_history=self._collect_issue_history(manifest),
+                    human_hint=self._human_hint_for(iteration),
                 )
                 candidate_path.write_text(repair.script.rstrip() + "\n", encoding="utf-8")
                 writer_summary = repair.summary
@@ -354,6 +384,7 @@ class AssetGenerationOrchestrator:
                 render.images,
                 iteration,
                 issue_history=self._collect_issue_history(manifest),
+                human_hint=self._human_hint_for(iteration),
             )
             self._save_decision(run_dir, manifest, record, decision)
             self._print_review(decision.review)
@@ -364,7 +395,7 @@ class AssetGenerationOrchestrator:
 
             self.iteration_agent.write_revision(decision, candidate_path)
             writer_summary = decision.summary
-            self.console.print("[green]GPT revised script saved[/green].")
+            self._print_revision_saved(decision)
             self._restore_protected_files(protected)
         else:
             manifest.status = "max_iterations"
@@ -516,11 +547,9 @@ class AssetGenerationOrchestrator:
 
     @staticmethod
     def _collect_issue_history(manifest: RunManifest) -> list[HistoricalVisualIssue]:
-        """Return every prior moderate-or-higher issue in chronological order.
-        ``VisualIssue`` currently permits only moderate, major, and
-        critical severities, so every stored review issue belongs in memory.
-        Iteration and issue indices make repeated or recurring observations
-        distinguishable without mutating the original reviews.
+        """Return prior moderate-or-higher issues in chronological order.
+        Legacy minor issues remain readable in old manifests but are not fed back
+        to the model or written to the active regression checklist.
         """
         remembered_severities = {"moderate", "major", "critical"}
         history: list[HistoricalVisualIssue] = []
@@ -543,6 +572,28 @@ class AssetGenerationOrchestrator:
         self.console.print(
             f"[cyan]Visual score[/cyan]: {review.overall_score:.2f}/10, "
             f"verdict={review.verdict}"
+        )
+
+    def _print_revision_saved(self, decision: VisionCodeDecision) -> None:
+        if decision.review.verdict == "retake_views":
+            self.console.print(
+                "[green]GPT camera-only retake script saved[/green]; "
+                "the next iteration will render a new diagnostic view set."
+            )
+        else:
+            self.console.print("[green]GPT revised script saved[/green].")
+
+    def _human_hint_for(self, iteration: int) -> str | None:
+        if self.human_hint is None or iteration < self.human_hint_from_iteration:
+            return None
+        return self.human_hint
+
+    def _print_human_hint(self) -> None:
+        if self.human_hint is None:
+            return
+        self.console.print(
+            f"[yellow]Human hint active from iteration "
+            f"{self.human_hint_from_iteration}[/yellow]: {self.human_hint}"
         )
 
     @staticmethod

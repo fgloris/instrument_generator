@@ -10,19 +10,17 @@ from .openai_compatible import OpenAICompatibleClient
 from .utils import extract_json_object
 
 
-SYSTEM_PROMPT = """You are an expert Blender 5.2 Python engineer creating physically coherent laboratory
-instrument assets. Return exactly two tagged sections and nothing else:
+SYSTEM_PROMPT = """You are a Blender 5.2 Python engineer. Follow the supplied script contract and return exactly:
 
 <BLENDER_SCRIPT>
-A complete executable Python file, without Markdown fences.
+A complete executable Python file without Markdown fences.
 </BLENDER_SCRIPT>
 <SUMMARY>
-A concise plain-text summary of the generated design.
+A concise design summary.
 </SUMMARY>
 
-Never return a patch. Never use network access, subprocesses, shell commands, eval, exec, or destructive
-filesystem operations. Follow all supplied project rules. You may only create the generated instrument script;
-the toolkit, reference, and documentation are immutable."""
+Never return a patch or modify supplied context. Never use network access, subprocesses, shell commands, eval,
+exec, or destructive filesystem operations."""
 
 
 class CodeWriter:
@@ -65,21 +63,19 @@ class CodeWriter:
         return None
 
     async def create_initial(self, spec: InstrumentSpec, candidate_path: Path) -> str:
-        prompt = f"""Create the initial instrument-generation script.
+        prompt = f"""Create the initial instrument-generation script for this target.
 
 TARGET SPEC:
 {json.dumps(spec.model_dump(mode='json'), ensure_ascii=False, indent=2)}
 
 {self._shared_context()}
 
-The script will be saved to {candidate_path}. It must honor LAB_ASSET_OUTPUT_DIR,
-LAB_RENDER_ENGINE, and LAB_RENDER_RESOLUTION, render at least three diagnostic views, and save a blend file.
-Return the complete script and a concise summary using the required tags.
+GENERATED SCRIPT PATH: {candidate_path}
 """
         return await self._complete_and_write(prompt, candidate_path)
 
     def _shared_context(self) -> str:
-        return f"""AGENT RULES:
+        return f"""SCRIPT CONTRACT:
 {self.rules}
 
 BLENDER/PROJECT DOCUMENTATION:

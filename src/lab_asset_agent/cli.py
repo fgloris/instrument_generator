@@ -19,13 +19,29 @@ console = Console()
 def generate(
     spec: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True, dir_okay=False),
+    human_hint: str | None = typer.Option(
+        None,
+        "--human-hint",
+        help="Human guidance injected into eligible GPT review/repair iterations.",
+    ),
+    human_hint_from_iteration: int = typer.Option(
+        1,
+        "--human-hint-from-iteration",
+        min=1,
+        help="First iteration that receives --human-hint.",
+    ),
 ) -> None:
     """Generate one instrument through initial model -> Blender -> GPT review+code iterations."""
     cfg = load_config(config)
     instrument = load_spec(spec)
     from .orchestrator import AssetGenerationOrchestrator
 
-    orchestrator = AssetGenerationOrchestrator(cfg, console)
+    orchestrator = AssetGenerationOrchestrator(
+        cfg,
+        console,
+        human_hint=human_hint,
+        human_hint_from_iteration=human_hint_from_iteration,
+    )
     manifest = asyncio.run(orchestrator.run(instrument))
     console.print_json(json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False))
     if manifest.status != "passed":
@@ -39,6 +55,17 @@ def resume(
         help="Run directory to resume. Omit it to resume the newest run.",
     ),
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True, dir_okay=False),
+    human_hint: str | None = typer.Option(
+        None,
+        "--human-hint",
+        help="Override or add human guidance for the resumed run.",
+    ),
+    human_hint_from_iteration: int = typer.Option(
+        1,
+        "--human-hint-from-iteration",
+        min=1,
+        help="First iteration that receives a newly supplied --human-hint.",
+    ),
 ) -> None:
     """Resume an interrupted run without repeating completed initial-generation work."""
     cfg = load_config(config)
@@ -59,7 +86,12 @@ def resume(
 
     from .orchestrator import AssetGenerationOrchestrator
 
-    orchestrator = AssetGenerationOrchestrator(cfg, console)
+    orchestrator = AssetGenerationOrchestrator(
+        cfg,
+        console,
+        human_hint=human_hint,
+        human_hint_from_iteration=human_hint_from_iteration,
+    )
     manifest = asyncio.run(orchestrator.resume(run_dir))
     console.print_json(json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False))
     if manifest.status != "passed":
@@ -71,6 +103,17 @@ def batch(
     specs_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True, dir_okay=False),
     continue_on_error: bool = typer.Option(True, help="Continue after a failed instrument."),
+    human_hint: str | None = typer.Option(
+        None,
+        "--human-hint",
+        help="Human guidance applied to every generated instrument.",
+    ),
+    human_hint_from_iteration: int = typer.Option(
+        1,
+        "--human-hint-from-iteration",
+        min=1,
+        help="First iteration that receives --human-hint.",
+    ),
 ) -> None:
     """Generate every YAML specification in a directory, sequentially."""
     from .orchestrator import AssetGenerationOrchestrator
@@ -84,7 +127,14 @@ def batch(
     failed = False
     for spec_path in spec_paths:
         try:
-            manifest = asyncio.run(AssetGenerationOrchestrator(cfg, console).run(load_spec(spec_path)))
+            manifest = asyncio.run(
+                AssetGenerationOrchestrator(
+                    cfg,
+                    console,
+                    human_hint=human_hint,
+                    human_hint_from_iteration=human_hint_from_iteration,
+                ).run(load_spec(spec_path))
+            )
             table.add_row(
                 spec_path.name,
                 manifest.status,
