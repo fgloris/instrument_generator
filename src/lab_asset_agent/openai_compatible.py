@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import copy
 import sys
 from pathlib import Path
@@ -167,7 +168,14 @@ class OpenAICompatibleClient:
             self.client = OpenAI(
                 api_key=require_env(config.api_key_env),
                 base_url=config.base_url.rstrip("/") + "/",
-                timeout=config.request_timeout_seconds,
+                max_retries=config.max_retries,
+                timeout=httpx.Timeout(
+                    timeout=config.request_timeout_seconds,
+                    connect=config.connect_timeout_seconds,
+                    read=config.request_timeout_seconds,
+                    write=30.0,
+                    pool=10.0,
+                ),
             )
 
     def chat(

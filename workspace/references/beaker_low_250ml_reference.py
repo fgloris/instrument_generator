@@ -13,8 +13,9 @@ from mathutils import Vector
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+TOOLKIT_DIR = SCRIPT_DIR.parent / "toolkit"
+if str(TOOLKIT_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLKIT_DIR))
 
 import lab_blender_toolkit as lab
 
@@ -141,6 +142,13 @@ def build_asset() -> bpy.types.Object:
         minor_width=lab.mm(0.22),
         major_width=lab.mm(0.55),
         major_every=5,
+    )
+
+    lab.enable_freestyle_outline(
+        thickness_px=5,
+        color=(0.0, 0.0, 0.0, 1.0),
+        include_open_borders=True,
+        include_creases=False,
     )
 
     camera = lab.create_camera(studio_collection)

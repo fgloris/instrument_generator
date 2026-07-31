@@ -21,7 +21,9 @@ models:
     model: deepseek-reasoner
     max_tokens: 12000
     temperature: 0.1
-    request_timeout_seconds: 1800
+    max_retries: 8
+    connect_timeout_seconds: 120
+    request_timeout_seconds: 900
     response_format_mode: text
     stream: true
     stream_to_terminal: true
@@ -39,7 +41,9 @@ models:
     model: gpt-5.6-sol
     max_tokens: 12000
     temperature: 0.1
-    request_timeout_seconds: 600
+    max_retries: 8
+    connect_timeout_seconds: 120
+    request_timeout_seconds: 900
     response_format_mode: text
     stream: true
     stream_to_terminal: true

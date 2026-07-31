@@ -25,153 +25,147 @@ importlib.reload(lab)
 
 
 NAME = "Erlenmeyer_Flask_250mL"
+INSTRUMENT_ID = "erlenmeyer_flask_250ml"
 NOMINAL_VOLUME_ML = 250
 HEIGHT_MM = 145.0
 BASE_DIAMETER_MM = 82.0
 NECK_OUTER_DIAMETER_MM = 30.0
 NOMINAL_WALL_THICKNESS_MM = 2.0
-SHOULDER_START_MM = 84.0
 RADIAL_SEGMENTS = 192
 
 OUTPUT_DIR = Path(
-    os.getenv(
-        "LAB_ASSET_OUTPUT_DIR",
-        str(SCRIPT_DIR / "output" / NAME),
-    )
+    os.getenv("LAB_ASSET_OUTPUT_DIR", str(SCRIPT_DIR / "output" / NAME))
 ).resolve()
 RENDER_ENGINE = os.getenv("LAB_RENDER_ENGINE", "BLENDER_EEVEE")
 RESOLUTION = int(os.getenv("LAB_RENDER_RESOLUTION", "768"))
 
-if RESOLUTION <= 0:
-    raise ValueError("LAB_RENDER_RESOLUTION must be a positive integer.")
-
 OUTER_PROFILE = lab.smooth_profile_from_mm(
     [
-        (40.5, 0.0),
-        (41.0, 2.5),
-        (40.5, 7.0),
-        (36.9, 70.0),
-        (35.5, 84.0),
-        (30.0, 99.0),
-        (22.0, 112.0),
-        (16.0, 121.0),
-        (15.0, 126.0),
-        (15.0, 139.0),
-        (17.0, 141.5),
-        (17.2, 143.5),
-        (16.5, 145.0),
+        (40.0, 0.0),
+        (41.0, 2.0),
+        (41.0, 7.0),
+        (39.5, 18.0),
+        (35.0, 55.0),
+        (29.0, 82.0),
+        (22.0, 99.0),
+        (16.0, 108.0),
+        (15.0, 113.0),
+        (15.0, 138.0),
+        (16.8, 140.5),
+        (17.0, 143.5),
+        (16.0, 145.0),
     ],
     samples_per_segment=10,
-    sharp_indices={0, 1, 12},
+    sharp_indices={0, 1, 8, 9, 10, 11, 12},
 )
 
 INNER_PROFILE = lab.smooth_profile_from_mm(
     [
-        (38.5, 4.5),
-        (38.5, 7.0),
-        (34.9, 70.0),
-        (33.5, 84.0),
-        (28.0, 99.0),
-        (20.0, 112.0),
-        (14.0, 121.0),
-        (13.0, 126.0),
-        (13.0, 139.0),
-        (14.0, 141.5),
-        (14.2, 143.5),
-        (13.2, 145.0),
+        (38.0, 4.0),
+        (39.0, 7.0),
+        (37.5, 18.0),
+        (33.0, 55.0),
+        (27.0, 82.0),
+        (20.0, 99.0),
+        (13.0, 108.0),
+        (13.0, 113.0),
+        (13.0, 138.0),
+        (14.5, 140.5),
+        (14.7, 143.5),
+        (13.0, 145.0),
     ],
     samples_per_segment=10,
-    sharp_indices={0, 11},
+    sharp_indices={0, 7, 8, 9, 10, 11},
 )
 
 GRADUATION_STYLE = lab.GraduationStyle(
-    end_angle_deg=-34.0,
+    end_angle_deg=-35.0,
     major_length=lab.mm(15.0),
     minor_length=lab.mm(8.0),
-    line_radius=lab.mm(0.25),
-    surface_clearance=lab.mm(0.015),
+    line_radius=lab.mm(0.24),
+    surface_clearance=lab.mm(0.008),
     label_tangent_offset=lab.mm(4.8),
-    text_size=lab.mm(3.9),
-    text_extrude=lab.mm(0.014),
+    text_size=lab.mm(4.0),
+    text_extrude=lab.mm(0.010),
     text_outline=lab.mm(0.005),
-    text_surface_clearance=lab.mm(0.010),
+    text_surface_clearance=lab.mm(0.006),
     text_curve_resolution=12,
-    text_subdivision_cuts=2,
-    top_clearance=lab.mm(5.0),
+    text_subdivision_cuts=1,
+    top_clearance=lab.mm(18.0),
     arc_samples=28,
 )
 
-AUXILIARY_LABEL_STYLE = lab.GraduationStyle(
-    end_angle_deg=-34.0,
+UNIT_LABEL_STYLE = lab.GraduationStyle(
+    end_angle_deg=-35.0,
     major_length=lab.mm(15.0),
     minor_length=lab.mm(8.0),
-    line_radius=lab.mm(0.25),
-    surface_clearance=lab.mm(0.015),
-    label_tangent_offset=lab.mm(4.8),
-    text_size=lab.mm(3.2),
-    text_extrude=lab.mm(0.014),
+    line_radius=lab.mm(0.24),
+    surface_clearance=lab.mm(0.008),
+    label_tangent_offset=lab.mm(-8.0),
+    text_size=lab.mm(3.5),
+    text_extrude=lab.mm(0.010),
     text_outline=lab.mm(0.004),
-    text_surface_clearance=lab.mm(0.010),
+    text_surface_clearance=lab.mm(0.006),
     text_curve_resolution=12,
-    text_subdivision_cuts=2,
-    top_clearance=lab.mm(5.0),
+    text_subdivision_cuts=1,
+    top_clearance=lab.mm(18.0),
     arc_samples=28,
 )
 
 VIEWS = [
     lab.RenderView(
-        "graduations_front_three_quarter",
-        -50.0,
-        17.0,
-        0.315,
-        62.0,
+        name="graduations_front",
+        azimuth_deg=-50.0,
+        elevation_deg=17.0,
+        distance=0.305,
+        lens_mm=62.0,
     ),
     lab.RenderView(
-        "shoulder_and_neck",
-        30.0,
-        22.0,
-        0.320,
-        64.0,
+        name="mouth_and_shoulder",
+        azimuth_deg=35.0,
+        elevation_deg=31.0,
+        distance=0.315,
+        lens_mm=64.0,
     ),
     lab.RenderView(
-        "mouth_high_angle",
-        -120.0,
-        34.0,
-        0.330,
-        64.0,
+        name="rear_three_quarter",
+        azimuth_deg=142.0,
+        elevation_deg=20.0,
+        distance=0.310,
+        lens_mm=62.0,
     ),
     lab.RenderView(
-        "base_and_profile",
-        142.0,
-        12.0,
-        0.310,
-        62.0,
+        name="low_base_diagnostic",
+        azimuth_deg=-58.0,
+        elevation_deg=9.0,
+        distance=0.300,
+        lens_mm=60.0,
     ),
 ]
 
 
-def validate_geometry() -> tuple[float, float]:
+def validate_geometry() -> float:
     capacity_ml = lab.profile_capacity_ml(INNER_PROFILE)
     if capacity_ml < NOMINAL_VOLUME_ML:
         raise RuntimeError(
-            f"Inner profile capacity is {capacity_ml:.2f} mL; "
-            f"at least {NOMINAL_VOLUME_ML} mL is required."
+            f"Inner profile capacity is {capacity_ml:.2f} mL, below the "
+            f"required {NOMINAL_VOLUME_ML} mL."
         )
 
     nominal_mark_z = lab.height_for_volume_ml(
         INNER_PROFILE,
         NOMINAL_VOLUME_ML,
     )
-    if nominal_mark_z >= lab.mm(SHOULDER_START_MM):
+    shoulder_start_z = lab.mm(82.0)
+    if nominal_mark_z >= shoulder_start_z:
         raise RuntimeError(
-            "The calculated 250 mL graduation is not below the shoulder."
+            "The nominal 250 mL graduation must remain below the shoulder."
         )
-
-    return capacity_ml, nominal_mark_z
+    return capacity_ml
 
 
 def build_asset() -> bpy.types.Object:
-    capacity_ml, nominal_mark_z = validate_geometry()
+    capacity_ml = validate_geometry()
 
     lab.clear_scene()
     lab.configure_scene(
@@ -180,9 +174,9 @@ def build_asset() -> bpy.types.Object:
         render_engine=RENDER_ENGINE,
     )
 
-    asset_collection = lab.create_collection("ASSET_ErlenmeyerFlask")
-    marking_collection = lab.create_collection("ASSET_Graduations")
-    studio_collection = lab.create_collection("STUDIO")
+    asset_collection = lab.create_collection("ASSET_Erlenmeyer_Flask")
+    marking_collection = lab.create_collection("MARKINGS_Graduations")
+    studio_collection = lab.create_collection("STUDIO_Diagnostic")
 
     glass_material = lab.create_borosilicate_glass_material(
         name="MAT_Clear_Borosilicate_Glass",
@@ -204,27 +198,29 @@ def build_asset() -> bpy.types.Object:
         radial_segments=RADIAL_SEGMENTS,
     )
 
+    nominal_mark_z_mm = (
+        lab.height_for_volume_ml(INNER_PROFILE, NOMINAL_VOLUME_ML) * 1000.0
+    )
     lab.assign_metadata(
         flask,
         {
-            "asset_id": "erlenmeyer_flask_250ml",
-            "name_en": "250 mL Erlenmeyer flask",
-            "name_zh": "250 mL 锥形瓶",
+            "asset_id": INSTRUMENT_ID,
             "instrument_type": "erlenmeyer_flask",
+            "name_en": "250 mL Erlenmeyer flask",
             "category": "laboratory_glassware",
             "material_type": "clear_borosilicate_glass",
             "nominal_volume_ml": NOMINAL_VOLUME_ML,
-            "calculated_inner_capacity_ml": round(capacity_ml, 3),
-            "nominal_mark_height_mm": round(nominal_mark_z * 1000.0, 3),
+            "calibration_class": "approximate",
+            "calculated_inner_capacity_ml": capacity_ml,
+            "nominal_mark_height_mm": nominal_mark_z_mm,
             "outer_height_mm": HEIGHT_MM,
-            "maximum_base_diameter_mm": BASE_DIAMETER_MM,
+            "base_diameter_mm": BASE_DIAMETER_MM,
             "neck_outer_diameter_mm": NECK_OUTER_DIAMETER_MM,
             "nominal_wall_thickness_mm": NOMINAL_WALL_THICKNESS_MM,
-            "bottom_thickness_mm": 4.5,
-            "graduation_type": "approximate",
-            "graduation_minor_interval_ml": 25,
-            "graduation_major_interval_ml": 50,
-            "mouth_type": "open_rolled_rim",
+            "bottom_thickness_mm": 4.0,
+            "mouth_open": True,
+            "has_liquid": False,
+            "has_stopper": False,
         },
     )
 
@@ -239,16 +235,16 @@ def build_asset() -> bpy.types.Object:
         collection=marking_collection,
     )
 
-    auxiliary_label_z = nominal_mark_z + lab.mm(7.0)
-    lab.create_conformal_surface_label(
-        name="Label_mL_APPROX",
-        text="mL APPROX",
-        z=auxiliary_label_z,
+    unit_label = lab.create_conformal_surface_label(
+        name="Label_Approximate_mL",
+        text="APPROX. mL",
+        z=lab.mm(91.0),
         outer_profile=OUTER_PROFILE,
-        style=AUXILIARY_LABEL_STYLE,
+        style=UNIT_LABEL_STYLE,
         material=marking_material,
         collection=marking_collection,
     )
+    unit_label["marking_type"] = "approximate_volume_unit_label"
 
     lab.create_grid_floor(
         collection=studio_collection,
@@ -260,22 +256,30 @@ def build_asset() -> bpy.types.Object:
         major_every=5,
     )
 
+    lab.enable_freestyle_outline(
+        thickness_px=1.25,
+        color=(0.015, 0.015, 0.018, 1.0),
+        include_open_borders=True,
+        include_creases=False,
+    )
+
     camera = lab.create_camera(
         collection=studio_collection,
-        name="Erlenmeyer_Diagnostic_Camera",
+        name="Diagnostic_Camera",
     )
-    target = Vector((0.0, 0.0, lab.mm(72.0)))
+    target = Vector((0.0, 0.0, lab.mm(72.5)))
     lab.setup_glass_product_lighting(studio_collection, target)
 
-    camera.location = lab.orbit_location(target, VIEWS[0])
-    camera.data.lens = VIEWS[0].lens_mm
+    first_view = VIEWS[0]
+    camera.location = lab.orbit_location(target, first_view)
+    camera.data.lens = first_view.lens_mm
     lab.look_at(camera, target)
     lab.select_only(flask)
 
     print("=" * 72)
     print(f"Generated: {NAME}")
     print(f"Integrated inner capacity: {capacity_ml:.2f} mL")
-    print(f"Calculated 250 mL mark height: {nominal_mark_z * 1000.0:.2f} mm")
+    print(f"250 mL mark height: {nominal_mark_z_mm:.2f} mm")
     print(f"Render engine: {RENDER_ENGINE}")
     print(f"Render resolution: {RESOLUTION} x {RESOLUTION}")
     print(f"Output directory: {OUTPUT_DIR}")
@@ -289,7 +293,6 @@ def build_asset() -> bpy.types.Object:
         filename_prefix=NAME,
     )
     lab.save_blend(OUTPUT_DIR / f"{NAME}.blend")
-
     return flask
 
 
@@ -297,5 +300,5 @@ if __name__ == "__main__":
     build_asset()
 </BLENDER_SCRIPT>
 <SUMMARY>
-Generates a dimensionally explicit 250 mL narrow-neck Erlenmeyer flask with a closed thick-bottomed hollow glass mesh, smooth conical shoulder, cylindrical neck, open thickened rim, and volume-integrated 25 mL graduations with 50 mL labels. The script validates capacity and 250 mL mark placement, adds metadata and a studio grid, renders four diagnostic views, and saves the Blender file under the configured output directory.
+Generates a dimensioned 250 mL narrow-neck Erlenmeyer flask with a flat 82 mm base, smoothly tapered conical body and shoulder, open thickened rim, approximately 2 mm glass walls, a 4 mm bottom, volume-integrated white graduations, metadata, four diagnostic renders, and a saved Blender file.
 </SUMMARY>

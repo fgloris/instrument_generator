@@ -1304,93 +1304,121 @@ def configure_scene(
 
 
 def enable_freestyle_outline(
-    thickness_px: float = 1.25,
-    color: tuple[float, float, float, float] = (0.025, 0.025, 0.030, 0.90),
+    thickness_px: float = 2.0,
+    color: tuple[float, float, float, float] = (0.02, 0.02, 0.02, 1.0),
     include_open_borders: bool = True,
     include_creases: bool = False,
-    line_set_name: str = "Diagnostic_Outline",
-    view_layer: bpy.types.ViewLayer | None = None,
 ) -> bpy.types.FreestyleLineSet:
-    """Overlay a camera-space Freestyle outline on Eevee/Cycles renders.
+    """Enable visible Freestyle outlines on the active scene.
 
-    This is intended as a *diagnostic visibility aid* for transparent or weakly
-    reflective instruments. By default it selects visible silhouettes plus open
-    mesh borders, while excluding creases/material boundaries that would clutter
-    laboratory glassware. Set ``include_creases=True`` only when hard mechanical
-    edges must also be emphasized.
+    This function uses Freestyle's parameter-editor mode rather than Python
+    style modules. It draws silhouettes and external contours directly over
+    the Combined render result.
 
-    Freestyle changes only the rendered line overlay; it does not repair or alter
-    geometry. Do not use it to conceal incorrect proportions or topology. For a
-    clean beauty render, simply omit this call.
+    Parameters
+    ----------
+    thickness_px:
+        Final line thickness in pixels.
+    color:
+        RGBA line color. Values must be in the range [0, 1].
+    include_open_borders:
+        Draw boundaries belonging to open meshes.
+    include_creases:
+        Draw sufficiently sharp mesh creases. Normally disabled for glass
+        vessels because it can produce noisy internal lines.
+
+    Returns
+    -------
+    bpy.types.FreestyleLineSet
+        The configured Freestyle line set.
     """
 
-    if thickness_px <= 0.0:
+    if thickness_px <= 0:
         raise ValueError("thickness_px must be positive.")
-    if len(color) != 4 or any(channel < 0.0 or channel > 1.0 for channel in color):
-        raise ValueError("color must be an RGBA tuple with values in [0, 1].")
+
+    if len(color) != 4:
+        raise ValueError("color must contain RGBA values.")
 
     scene = bpy.context.scene
-    layer = view_layer or bpy.context.view_layer
-    layer.use_freestyle = True
+
+    # Master Freestyle switch.
+    scene.render.use_freestyle = True
+
+    # Use the line-style thickness directly instead of multiplying it by
+    # another global thickness value.
     if hasattr(scene.render, "line_thickness_mode"):
         scene.render.line_thickness_mode = "ABSOLUTE"
     if hasattr(scene.render, "line_thickness"):
         scene.render.line_thickness = 1.0
 
-    settings = layer.freestyle_settings
-    if hasattr(settings, "mode"):
-        settings.mode = "EDITOR"
+    # Configure every enabled view layer. This is safer than using only
+    # bpy.context.view_layer in background/headless rendering.
+    configured_line_set = None
 
-    line_set = settings.linesets.get(line_set_name)
-    if line_set is None:
-        if len(settings.linesets):
-            line_set = settings.linesets[0]
-            line_set.name = line_set_name
-        else:
-            line_set = settings.linesets.new(line_set_name)
+    for view_layer in scene.view_layers:
+        if not view_layer.use:
+            continue
 
-    # Keep only one active diagnostic line set when the API exposes show_render.
-    for candidate in settings.linesets:
-        if hasattr(candidate, "show_render"):
-            candidate.show_render = candidate == line_set
+        freestyle = view_layer.freestyle_settings
 
-    if hasattr(line_set, "select_by_edge_types"):
-        line_set.select_by_edge_types = True
-    edge_flags = (
-        "select_silhouette",
-        "select_border",
-        "select_crease",
-        "select_contour",
-        "select_external_contour",
-        "select_suggestive_contour",
-        "select_ridge_valley",
-        "select_material_boundary",
-        "select_edge_mark",
-    )
-    for attribute in edge_flags:
-        if hasattr(line_set, attribute):
-            setattr(line_set, attribute, False)
-    line_set.select_silhouette = True
-    if hasattr(line_set, "select_border"):
+        # Critical: Line Sets are evaluated in EDITOR mode.
+        # The API default may be SCRIPT, which expects Python style modules.
+        freestyle.mode = "EDITOR"
+
+        # Critical: keep lines overlaid on the normal Combined result.
+        # Otherwise render_views() saves the Combined PNG without the lines.
+        if hasattr(freestyle, "use_freestyle_as_render_pass"):
+            freestyle.use_freestyle_as_render_pass = False
+
+        # Remove Blender's default or previously generated line sets so that
+        # stale selection settings cannot interfere with this configuration.
+        while len(freestyle.linesets) > 0:
+            freestyle.linesets.remove(freestyle.linesets[0])
+
+        line_set = freestyle.linesets.new("Geometry_Outline")
+
+        # Logical relationship between enabled edge types.
+        line_set.edge_type_combination = "OR"
+
+        # Visible camera-facing silhouette edges.
+        line_set.select_silhouette = True
+
+        # Outer contours are important for closed, smooth vessels.
+        # Depending on the geometry and view, relying on silhouette alone can
+        # miss part of the apparent outer boundary.
+        line_set.select_external_contour = True
+
+        # Borders mainly matter for open surfaces.
         line_set.select_border = include_open_borders
-    if hasattr(line_set, "select_crease"):
+
+        # Creases are usually undesirable on dense glass meshes.
         line_set.select_crease = include_creases
-    if hasattr(line_set, "select_by_visibility"):
-        line_set.select_by_visibility = True
-    if hasattr(line_set, "visibility"):
+
+        # Explicitly disable unrelated edge categories.
+        line_set.select_edge_mark = False
+        line_set.select_material_boundary = False
+        line_set.select_ridge_valley = False
+        line_set.select_suggestive_contour = False
+
+        # Only draw edges that are visible from the camera.
         line_set.visibility = "VISIBLE"
 
-    style = line_set.linestyle
-    style.color = color[:3]
-    style.alpha = color[3]
-    style.thickness = thickness_px
-    if hasattr(style, "thickness_position"):
-        style.thickness_position = "INSIDE"
-    if hasattr(style, "use_chaining"):
-        style.use_chaining = True
-    if hasattr(style, "caps"):
-        style.caps = "ROUND"
-    return line_set
+        line_style = line_set.linestyle
+        line_style.color = color[:3]
+        line_style.alpha = color[3]
+        line_style.thickness = float(thickness_px)
+
+        configured_line_set = line_set
+
+    if configured_line_set is None:
+        raise RuntimeError("No enabled View Layer was available for Freestyle.")
+
+    print("[Freestyle] enabled")
+    print(f"[Freestyle] engine={scene.render.engine}")
+    print(f"[Freestyle] thickness={thickness_px}px")
+    print(f"[Freestyle] view_layers={len(scene.view_layers)}")
+
+    return configured_line_set
 
 
 def look_at(

@@ -95,44 +95,7 @@ $env:VECTOR_ENGINE_API_KEY="sk-..."
 
 ## 2. 配置
 
-```powershell
-Copy-Item config.example.yaml config.yaml
-```
-
-核心配置：
-
-```yaml
-models:
-  # deepseek 或 gpt，仅影响第一版脚本
-  initial_generator: deepseek
-
-  initial_writer:
-    base_url: "https://api.deepseek.com"
-    api_key_env: DEEPSEEK_API_KEY
-    model: deepseek-reasoner
-    max_tokens: 12000
-    temperature: 0.1
-    request_timeout_seconds: 1800
-    response_format_mode: text
-    stream: true
-    stream_to_terminal: true
-    stream_reasoning: progress
-
-  iteration_agent:
-    base_url: "https://api.vectorengine.ai/v1"
-    api_key_env: VECTOR_ENGINE_API_KEY
-    model: gpt-4o
-    max_tokens: 12000
-    temperature: 0.1
-    request_timeout_seconds: 600
-    response_format_mode: text
-    stream: true
-    stream_to_terminal: true
-    stream_reasoning: progress
-    max_images: 4
-    max_image_side: 1280
-    jpeg_quality: 90
-```
+config.yaml
 
 ### 对比 DeepSeek 和 GPT 的第一版
 
@@ -151,25 +114,6 @@ models:
 ```
 
 其余后续循环完全相同，便于公平比较第一版脚本质量。
-
-### 旧配置兼容
-
-v0.2 的配置仍能读取：
-
-```yaml
-models:
-  code_writer: ...
-  visual_reviewer: ...
-```
-
-运行时会自动映射为：
-
-```text
-code_writer      → initial_writer
-visual_reviewer  → iteration_agent
-```
-
-由于新的 GPT 响应还要包含完整 Python 脚本，旧视觉配置迁移时会自动把输出上限至少提升到 12000 tokens、超时至少提升到 600 秒，并使用纯文本模式。仍建议手工更新为新版配置名。
 
 ## 3. 检查配置
 
@@ -190,17 +134,13 @@ lab-asset-agent check-config -c config.yaml
 ## 4. 生成一个仪器
 
 ```powershell
-lab-asset-agent generate `
-  workspace/specs/beaker_low_250ml.yaml `
-  -c config.yaml
+lab-asset-agent generate workspace/specs/beaker_low_250ml.yaml -c config.yaml
 ```
 
 锥形瓶示例：
 
 ```powershell
-lab-asset-agent generate `
-  workspace/specs/erlenmeyer_250ml.yaml `
-  -c config.yaml
+lab-asset-agent generate workspace/specs/erlenmeyer_250ml.yaml -c config.yaml
 ```
 
 ## 5. 运行时流式输出
@@ -416,18 +356,13 @@ Blender 使用：
 
 ## 12. 测试
 
-测试完全离线，不调用 DeepSeek 或 VectorEngine：
-
-```powershell
-pytest -q
 ```
-
-覆盖：
-
-- 新旧配置迁移；
-- DeepSeek/GPT 初始路由；
-- GPT 是否收到精确代码和 JPEG base64 图片；
-- 合并响应评审与完整代码解析；
-- `revise` 却未返回完整脚本时拒绝继续；
-- API response-format 降级逻辑；
-- Blender 脚本安全检查。
+cd lab_asset_agent
+& "blender.exe" `
+  --background `
+  --factory-startup `
+  --offline-mode `
+  --python-use-system-env `
+  --python-exit-code 1 `
+  --python "$project\workspace\references\beaker_low_250ml_reference.py"
+```

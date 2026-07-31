@@ -49,7 +49,9 @@ class OpenAICompatibleModelConfig(BaseModel):
     model: str
     max_tokens: int | None = Field(default=4000, ge=256)
     temperature: float | None = Field(default=0.1, ge=0.0, le=2.0)
-    request_timeout_seconds: int = Field(default=300, ge=10)
+    max_retries: int = Field(default=8, ge=0)
+    connect_timeout_seconds: float = Field(default=60.0, ge=1.0)
+    request_timeout_seconds: float = Field(default=900.0, ge=10.0)
     response_format_mode: Literal["auto", "json_schema", "json_object", "text"] = "auto"
     stream: bool = True
     stream_to_terminal: bool = True
