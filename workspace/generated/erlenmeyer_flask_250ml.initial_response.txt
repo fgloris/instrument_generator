@@ -1,0 +1,279 @@
+<BLENDER_SCRIPT>
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Generate a physically dimensioned 250 mL Erlenmeyer flask in Blender 5.2."""
+
+from __future__ import annotations
+
+import importlib
+import os
+import sys
+from pathlib import Path
+
+import bpy
+from mathutils import Vector
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+TOOLKIT_DIR = SCRIPT_DIR.parent / "toolkit"
+if str(TOOLKIT_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLKIT_DIR))
+
+import lab_blender_toolkit as lab
+
+importlib.reload(lab)
+
+
+NAME = "Erlenmeyer_Flask_250mL"
+ASSET_ID = "erlenmeyer_flask_250ml"
+NOMINAL_VOLUME_ML = 250
+HEIGHT_MM = 145.0
+BASE_DIAMETER_MM = 82.0
+NECK_OUTER_DIAMETER_MM = 30.0
+WALL_THICKNESS_MM = 2.0
+SHOULDER_START_MM = 80.0
+RADIAL_SEGMENTS = 224
+
+OUTPUT_DIR = Path(
+    os.getenv("LAB_ASSET_OUTPUT_DIR", str(SCRIPT_DIR / "output" / NAME))
+).resolve()
+RENDER_ENGINE = os.getenv("LAB_RENDER_ENGINE", "BLENDER_EEVEE")
+RESOLUTION = int(os.getenv("LAB_RENDER_RESOLUTION", "768"))
+
+# The broad, nearly planar lower rings form a stable 78 mm contact footprint,
+# while the rounded heel reaches the specified 82 mm maximum diameter.
+OUTER_PROFILE = lab.profile_from_mm(
+    [
+        (39.0, 0.0),
+        (40.4, 0.8),
+        (41.0, 2.0),
+        (41.0, 4.5),
+        (40.6, 7.5),
+        (39.3, 14.0),
+        (37.0, 28.0),
+        (34.0, 50.0),
+        (31.8, 68.0),
+        (30.5, 80.0),
+        (29.9, 83.0),
+        (28.5, 87.0),
+        (26.2, 91.5),
+        (23.0, 96.0),
+        (19.7, 99.5),
+        (17.2, 102.0),
+        (15.7, 104.5),
+        (15.0, 108.0),
+        (15.0, 137.5),
+        (15.3, 139.0),
+        (16.7, 140.5),
+        (17.0, 142.0),
+        (17.0, 143.5),
+        (16.2, 145.0),
+    ]
+)
+
+# The cavity begins 4.5 mm above the external base, providing a thicker glass
+# bottom. Body and neck clearances remain close to the specified 2 mm wall.
+INNER_PROFILE = lab.profile_from_mm(
+    [
+        (38.5, 4.5),
+        (38.5, 7.5),
+        (37.2, 14.0),
+        (35.0, 28.0),
+        (32.0, 50.0),
+        (29.8, 68.0),
+        (28.0, 80.0),
+        (27.4, 83.0),
+        (26.0, 87.0),
+        (23.7, 91.5),
+        (20.6, 96.0),
+        (17.3, 99.5),
+        (14.8, 102.0),
+        (13.4, 104.5),
+        (13.0, 108.0),
+        (13.0, 137.5),
+        (13.2, 139.0),
+        (14.2, 140.5),
+        (14.5, 142.0),
+        (14.5, 143.5),
+        (14.2, 145.0),
+    ]
+)
+
+GRADUATION_STYLE = lab.GraduationStyle(
+    end_angle_deg=-34.0,
+    major_length=lab.mm(15.0),
+    minor_length=lab.mm(8.0),
+    line_radius=lab.mm(0.25),
+    surface_clearance=lab.mm(0.015),
+    label_tangent_offset=lab.mm(4.8),
+    text_size=lab.mm(4.0),
+    text_extrude=lab.mm(0.014),
+    text_outline=lab.mm(0.005),
+    text_surface_clearance=lab.mm(0.010),
+    text_curve_resolution=12,
+    text_subdivision_cuts=2,
+    top_clearance=lab.mm(4.0),
+    arc_samples=28,
+)
+
+VIEWS = [
+    lab.RenderView(
+        name="graduations_front",
+        azimuth_deg=-49.0,
+        elevation_deg=15.0,
+        distance=0.310,
+        lens_mm=62.0,
+    ),
+    lab.RenderView(
+        name="shoulder_opposite",
+        azimuth_deg=128.0,
+        elevation_deg=20.0,
+        distance=0.315,
+        lens_mm=62.0,
+    ),
+    lab.RenderView(
+        name="mouth_high",
+        azimuth_deg=-24.0,
+        elevation_deg=34.0,
+        distance=0.325,
+        lens_mm=64.0,
+    ),
+    lab.RenderView(
+        name="base_and_marks_low",
+        azimuth_deg=-61.0,
+        elevation_deg=8.0,
+        distance=0.305,
+        lens_mm=60.0,
+    ),
+]
+
+
+def build_asset() -> bpy.types.Object:
+    """Build, render, and save the complete Erlenmeyer flask asset."""
+    lab.clear_scene()
+    lab.configure_scene(
+        resolution=RESOLUTION,
+        transparent_background=False,
+        render_engine=RENDER_ENGINE,
+    )
+
+    asset_collection = lab.create_collection("ASSET_Flask")
+    marking_collection = lab.create_collection("ASSET_Graduations")
+    studio_collection = lab.create_collection("STUDIO")
+
+    capacity_ml = lab.profile_capacity_ml(INNER_PROFILE)
+    if capacity_ml < NOMINAL_VOLUME_ML:
+        raise ValueError(
+            f"Inner profile capacity {capacity_ml:.2f} mL is below the "
+            f"required {NOMINAL_VOLUME_ML} mL."
+        )
+
+    nominal_mark_z = lab.height_for_volume_ml(
+        INNER_PROFILE,
+        NOMINAL_VOLUME_ML,
+    )
+    if nominal_mark_z >= lab.mm(SHOULDER_START_MM):
+        raise ValueError(
+            "The calculated 250 mL graduation is not below the shoulder."
+        )
+
+    glass_material = lab.create_borosilicate_glass_material(
+        name="MAT_Clear_Borosilicate",
+        tint=(1.0, 1.0, 1.0, 1.0),
+        roughness=0.012,
+        ior=1.47,
+        absorption_density=0.026,
+    )
+    marking_material = lab.create_marking_material(
+        name="MAT_Approximate_White_Graduations"
+    )
+
+    flask = lab.create_hollow_revolved_mesh(
+        name=NAME,
+        outer_profile=OUTER_PROFILE,
+        inner_profile=INNER_PROFILE,
+        collection=asset_collection,
+        material=glass_material,
+        radial_segments=RADIAL_SEGMENTS,
+    )
+
+    lab.assign_metadata(
+        flask,
+        {
+            "asset_id": ASSET_ID,
+            "instrument_type": "erlenmeyer_flask",
+            "name_en": "250 mL Erlenmeyer flask",
+            "name_zh": "250 mL 锥形瓶",
+            "category": "laboratory_glassware",
+            "nominal_volume_ml": NOMINAL_VOLUME_ML,
+            "graduation_accuracy": "approximate",
+            "calculated_inner_capacity_ml": round(capacity_ml, 3),
+            "nominal_mark_height_mm": round(nominal_mark_z * 1000.0, 3),
+            "outer_height_mm": HEIGHT_MM,
+            "maximum_base_diameter_mm": BASE_DIAMETER_MM,
+            "neck_outer_diameter_mm": NECK_OUTER_DIAMETER_MM,
+            "nominal_wall_thickness_mm": WALL_THICKNESS_MM,
+            "bottom_thickness_mm": 4.5,
+            "material_type": "clear_borosilicate_glass",
+            "mouth_state": "open",
+            "has_liquid": False,
+        },
+    )
+
+    lab.add_volume_graduations(
+        inner_profile=INNER_PROFILE,
+        outer_profile=OUTER_PROFILE,
+        nominal_volume_ml=NOMINAL_VOLUME_ML,
+        minor_interval_ml=25,
+        major_interval_ml=50,
+        style=GRADUATION_STYLE,
+        material=marking_material,
+        collection=marking_collection,
+    )
+
+    lab.create_grid_floor(
+        collection=studio_collection,
+        size=0.55,
+        z=lab.mm(-0.15),
+        spacing=lab.mm(10.0),
+        minor_width=lab.mm(0.22),
+        major_width=lab.mm(0.55),
+        major_every=5,
+    )
+
+    target = Vector((0.0, 0.0, lab.mm(72.0)))
+    camera = lab.create_camera(studio_collection)
+    lab.setup_glass_product_lighting(studio_collection, target)
+
+    camera.location = lab.orbit_location(target, VIEWS[0])
+    camera.data.lens = VIEWS[0].lens_mm
+    lab.look_at(camera, target)
+    lab.select_only(flask)
+
+    print("=" * 72)
+    print(f"Generated: {NAME}")
+    print(f"Integrated inner capacity: {capacity_ml:.2f} mL")
+    print(f"250 mL graduation height: {nominal_mark_z * 1000.0:.2f} mm")
+    print(f"Shoulder start height: {SHOULDER_START_MM:.2f} mm")
+    print(f"Render engine: {RENDER_ENGINE}")
+    print(f"Render resolution: {RESOLUTION}")
+    print(f"Output directory: {OUTPUT_DIR}")
+    print("=" * 72)
+
+    lab.render_views(
+        camera=camera,
+        target=target,
+        views=VIEWS,
+        output_directory=OUTPUT_DIR,
+        filename_prefix=NAME,
+    )
+    lab.save_blend(OUTPUT_DIR / f"{NAME}.blend")
+    return flask
+
+
+if __name__ == "__main__":
+    build_asset()
+</BLENDER_SCRIPT>
+<SUMMARY>
+Generates a dimensioned 250 mL clear borosilicate Erlenmeyer flask with a stable flat base, thick internal floor, tapered conical body, rounded shoulder, narrow cylindrical neck, open flared rim, and volume-integrated white 25 mL graduations with 50 mL labels. The script validates capacity and nominal-mark placement, renders four diagnostic views, attaches asset metadata, and saves the Blender file under the configured output directory.
+</SUMMARY>

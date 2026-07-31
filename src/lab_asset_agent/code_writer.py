@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+from pathlib import Path
+
+from .models import AppConfig, InstrumentSpec, OpenAICompatibleModelConfig
+from .openai_compatible import OpenAICompatibleClient
+from .utils import extract_json_object
+
+
+SYSTEM_PROMPT = """You are an expert Blender 5.2 Python engineer creating physically coherent laboratory
+instrument assets. Return exactly two tagged sections and nothing else:
+
+<BLENDER_SCRIPT>
+A complete executable Python file, without Markdown fences.
+</BLENDER_SCRIPT>
+<SUMMARY>
+A concise plain-text summary of the generated design.
+</SUMMARY>
+
+Never return a patch. Never use network access, subprocesses, shell commands, eval, exec, or destructive
+filesystem operations. Follow all supplied project rules. You may only create the generated instrument script;
+the toolkit, reference, and documentation are immutable."""
+
+
+class CodeWriter:
+    """Generate only the initial Blender script.
+
+    The model can be DeepSeek or the same GPT endpoint used by the iteration
+    agent. All post-render reasoning and revisions are intentionally handled by
+    :class:`VisionCodingAgent` in one multimodal request.
+    """
+
+    def __init__(
+        self,
+        config: AppConfig,
+        model_config: OpenAICompatibleModelConfig | None = None,
+        *,
+        client: OpenAICompatibleClient | None = None,
+    ) -> None:
+        self.config = config
+        self.model_config = model_config or config.models.initial_model
+        self.client = client or OpenAICompatibleClient(self.model_config)
+        self.toolkit = ""
+        self.reference = ""
+        self.docs = ""
+        self.rules = ""
+
+    async def start(self) -> None:
+        self.toolkit = self.config.paths.toolkit.read_text(encoding="utf-8")
+        self.reference = self.config.paths.reference.read_text(encoding="utf-8")
+        self.rules = self.config.paths.rules.read_text(encoding="utf-8")
+        doc_parts: list[str] = []
+        for path in sorted(self.config.paths.docs_dir.rglob("*")):
+            if path.is_file() and path.suffix.lower() in {".md", ".txt", ".py"}:
+                doc_parts.append(
+                    f"\n### {path.relative_to(self.config.paths.docs_dir)}\n"
+                    + path.read_text(encoding="utf-8", errors="replace")
+                )
+        self.docs = "\n".join(doc_parts)
+
+    async def close(self) -> None:
+        return None
+
+    async def create_initial(self, spec: InstrumentSpec, candidate_path: Path) -> str:
+        prompt = f"""Create the initial instrument-generation script.
+
+TARGET SPEC:
+{json.dumps(spec.model_dump(mode='json'), ensure_ascii=False, indent=2)}
+
+{self._shared_context()}
+
+The script will be saved to {candidate_path}. It must honor LAB_ASSET_OUTPUT_DIR,
+LAB_RENDER_ENGINE, and LAB_RENDER_RESOLUTION, render at least three diagnostic views, and save a blend file.
+Return the complete script and a concise summary using the required tags.
+"""
+        return await self._complete_and_write(prompt, candidate_path)
+
+    def _shared_context(self) -> str:
+        return f"""AGENT RULES:
+{self.rules}
+
+BLENDER/PROJECT DOCUMENTATION:
+{self.docs}
+
+REFERENCE INSTRUMENT SCRIPT:
+```python
+{self.reference}
+```
+
+SHARED TOOLKIT:
+```python
+{self.toolkit}
+```"""
+
+    async def _complete_and_write(self, prompt: str, candidate_path: Path) -> str:
+        partial_path = candidate_path.with_suffix(".initial_response.partial.txt")
+        final_response_path = candidate_path.with_suffix(".initial_response.txt")
+        text = await asyncio.to_thread(
+            self.client.chat,
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            stream_label=f"initial generator {self.model_config.model}",
+            stream_output_path=partial_path,
+        )
+        # Persist the exact streamed response before parsing so malformed model
+        # output remains inspectable and a successful request is never opaque.
+        final_response_path.write_text(text, encoding="utf-8")
+        partial_path.unlink(missing_ok=True)
+        script, summary = self._parse_response(text)
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        candidate_path.write_text(script.rstrip() + "\n", encoding="utf-8")
+        return summary
+
+    @classmethod
+    def _parse_response(cls, text: str) -> tuple[str, str]:
+        """Extract a complete script from tagged, JSON, fenced, or raw output."""
+
+        tagged_script = re.search(
+            r"<BLENDER_SCRIPT>\s*(.*?)\s*</BLENDER_SCRIPT>",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if tagged_script:
+            tagged_summary = re.search(
+                r"<SUMMARY>\s*(.*?)\s*</SUMMARY>",
+                text,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            script = cls._strip_code_fence(tagged_script.group(1))
+            summary = (
+                tagged_summary.group(1).strip()
+                if tagged_summary
+                else "The initial writer generated the candidate script."
+            )
+            if not script:
+                raise RuntimeError("Initial-writer response contained an empty <BLENDER_SCRIPT> section.")
+            return script, summary
+
+        try:
+            payload = extract_json_object(text)
+        except (ValueError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            script = payload.get("script")
+            if isinstance(script, str) and script.strip():
+                return (
+                    cls._strip_code_fence(script),
+                    str(payload.get("summary") or "The initial writer generated the candidate script."),
+                )
+
+        fenced = re.search(r"```(?:python)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+        if fenced:
+            script = cls._strip_code_fence(fenced.group(1))
+            if script:
+                return script, "The initial writer returned a complete fenced Python script."
+
+        raw = text.strip()
+        if cls._looks_like_python_script(raw):
+            return raw, "The initial writer returned a complete Python script."
+
+        raise RuntimeError(
+            "Initial-writer response did not contain <BLENDER_SCRIPT>, a legacy JSON `script`, "
+            "or a recognizable complete Python file."
+        )
+
+    @staticmethod
+    def _looks_like_python_script(text: str) -> bool:
+        if not text:
+            return False
+        head = "\n".join(text.splitlines()[:20])
+        has_import = bool(re.search(r"(?m)^\s*(?:from\s+\S+\s+import|import\s+\S+)", head))
+        has_blender = "bpy" in text or "lab_blender_toolkit" in text
+        return has_import and has_blender
+
+    @staticmethod
+    def _strip_code_fence(script: str) -> str:
+        script = script.strip()
+        if script.startswith("```python"):
+            script = script[len("```python") :].lstrip()
+        elif script.startswith("```"):
+            script = script[3:].lstrip()
+        if script.endswith("```"):
+            script = script[:-3].rstrip()
+        return script

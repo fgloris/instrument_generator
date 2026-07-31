@@ -1,0 +1,45 @@
+id: erlenmeyer_flask_250ml
+name_zh: 250 mL 锥形瓶
+name_en: 250 mL Erlenmeyer flask
+category: laboratory_glassware
+material: clear borosilicate glass
+nominal_volume_ml: 250
+
+appearance:
+  summary: >-
+    A standard narrow-neck Erlenmeyer flask with a flat circular base, conical body,
+    smooth shoulder transition, short cylindrical neck, and slightly thickened outward rim.
+  required_features:
+    - flat stable base
+    - conical body tapering into a smooth rounded shoulder
+    - centered narrow cylindrical neck
+    - open mouth with a subtly thickened outward rim
+    - real wall thickness and thicker bottom
+    - white approximate volume graduations and labels
+    - transparent, colorless borosilicate glass
+  forbidden_features:
+    - side arm
+    - stopper
+    - screw thread
+    - handle
+    - liquid
+    - sharp shoulder crease
+    - disconnected floating geometry
+
+dimensions_mm:
+  approximate_height: 145
+  approximate_base_diameter: 82
+  approximate_neck_outer_diameter: 30
+  approximate_wall_thickness: 2.0
+
+render_requirements:
+  minimum_views: 3
+  views_should_show:
+    - conical body proportions
+    - shoulder continuity
+    - neck and rim opening
+    - base thickness and graduation placement
+
+acceptance_notes:
+  - The nominal 250 mL mark is below the shoulder and is approximate, not class-A volumetric calibration.
+  - Geometry accuracy matters more than dramatic photorealism.

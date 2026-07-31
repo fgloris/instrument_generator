@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+runs/
+workspace/generated/*.py
+workspace/generated/*.blend
+workspace/generated/*.png
+workspace/generated/*.json
+workspace/generated/*.log
+!workspace/generated/.gitkeep
