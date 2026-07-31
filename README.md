@@ -66,8 +66,7 @@ lab_asset_agent/
 │   ├── toolkit/lab_blender_toolkit.py
 │   ├── references/beaker_low_250ml_reference.py
 │   ├── docs/blender_context.md
-│   ├── specs/
-│   └── generated/
+│   └── specs/
 ├── runs/
 └── tests/
 ```

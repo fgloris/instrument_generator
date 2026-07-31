@@ -145,7 +145,7 @@ def build_asset() -> bpy.types.Object:
     )
 
     lab.enable_freestyle_outline(
-        thickness_px=5,
+        thickness_px=3,
         color=(0.0, 0.0, 0.0, 1.0),
         include_open_borders=True,
         include_creases=False,

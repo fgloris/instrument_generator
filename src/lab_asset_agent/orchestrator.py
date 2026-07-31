@@ -410,15 +410,38 @@ class AssetGenerationOrchestrator:
         manifest: RunManifest,
         record: IterationRecord,
     ) -> None:
+        del spec  # Kept in the signature for compatibility with existing callers.
         self._resolve_record_artifacts(run_dir, record)
+
+        iteration_dir = run_dir / f"iteration_{record.iteration:02d}"
+        source_render_dir = iteration_dir / "render"
         final_dir = run_dir / "final"
-        final_dir.mkdir(exist_ok=True)
+
+        if final_dir.exists():
+            shutil.rmtree(final_dir)
+        final_dir.mkdir(parents=True)
+
         source_script = self._record_script_path(run_dir, record)
-        final_script = final_dir / f"{spec.id}.py"
+        final_script = final_dir / "instrument.py"
         shutil.copy2(source_script, final_script)
-        for path in record.render.images + record.render.blend_files:
-            if path.exists():
-                shutil.copy2(path, final_dir / path.name)
+
+        final_render_dir = final_dir / "render"
+        if source_render_dir.is_dir():
+            shutil.copytree(source_render_dir, final_render_dir)
+        else:
+            final_render_dir.mkdir(parents=True)
+            artifact_paths = [
+                *record.render.images,
+                *record.render.blend_files,
+                Path(record.render.log_path),
+            ]
+            copied: set[Path] = set()
+            for path in artifact_paths:
+                path = Path(path)
+                if path.is_file() and path not in copied:
+                    shutil.copy2(path, final_render_dir / path.name)
+                    copied.add(path)
+        
         manifest.status = "passed"
         manifest.failure_reason = None
         manifest.final_script = final_script
