@@ -165,6 +165,13 @@ class VisualIssue(BaseModel):
     recommended_change: str
 
 
+class HistoricalVisualIssue(VisualIssue):
+    """A prior review issue retained as regression memory for later iterations."""
+
+    iteration: int = Field(ge=1)
+    issue_index: int = Field(ge=1)
+
+
 class VLMReview(BaseModel):
     verdict: Literal["pass", "revise"]
     overall_score: float = Field(ge=0, le=10)

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lab-asset-agent"
-version = "0.3.1"
+version = "0.3.2"
 description = "Optional DeepSeek initialization + GPT multimodal review-and-code + local Blender agent"
 readme = "README.md"
 requires-python = ">=3.11"

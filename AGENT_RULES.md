@@ -24,7 +24,16 @@ The generated script must:
 10. Never use network access, subprocesses, shell commands, package installation, destructive filesystem
     operations, or dynamic execution such as `eval` and `exec`.
 11. Fix geometry instead of hiding defects through camera, lighting, cropping, exposure, or background changes.
-10. Fix geometry instead of hiding defects through camera, lighting, cropping, exposure, or background changes.
+
+## Geometry-only visual evaluation policy
+
+- Treat dark renders, weak reflections/highlights, low apparent transparency, dull glass, exposure, contrast,
+  shadows, and other photometric differences as environment-lighting artifacts, not asset defects.
+- Do not lower the score, create an issue, or revise the script solely for those appearance conditions.
+- Do not change camera, lighting, world strength, exposure, background, or glass roughness merely to make a render
+  prettier. Judge the geometry whenever it is readable in at least one supplied view.
+- Focus review and revision on silhouette, dimensions/proportions, openings, wall thickness, rims, joints, side
+  parts, topology, physical connections, and graduation geometry.
 
 ## Combined visual-review and revision policy
 
@@ -32,6 +41,11 @@ The GPT iteration agent sees the exact script that produced the supplied views. 
 together. When revision is required, it must return the complete corrected script in the same response rather
 than a patch or advice for another model. It should trace visible defects to likely code parameters, preserve
 already-correct geometry, and prioritize critical cross-view geometry problems over cosmetic rendering issues.
+
+Every later review and render-error repair also receives the complete chronological history of all previous
+moderate, major, and critical issues. Treat this history as regression memory: verify each old issue against
+the current script/renders, preserve successful fixes, and avoid reintroducing previously reported defects. An old
+issue is not proof that the defect still exists, so do not repeat it without current evidence.
 
 ## Graduation evaluation policy
 

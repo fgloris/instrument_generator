@@ -3,9 +3,27 @@
 """Blender 5.2 laboratory-asset toolkit.
 
 The module is instrument-agnostic. It provides reusable geometry, volume,
-graduation, glass-material, studio-lighting, camera, and rendering helpers.
-All low-level geometric values use Blender metres; use ``mm()`` for readable
-millimetre specifications.
+graduation, glass-material, studio-lighting, camera, outline, and rendering
+helpers. All low-level geometric values use Blender metres; use ``mm()`` for
+readable millimetre specifications.
+
+Recommended generated-script workflow for the coding model:
+
+1. ``clear_scene()`` and ``configure_scene(...)``.
+2. Create asset, marking, and studio collections with ``create_collection``.
+3. Build outer/inner vertical profiles with ``profile_from_mm``. For rounded
+   shoulders, bellies, or neck transitions, call ``smooth_profile`` or the
+   convenience wrapper ``smooth_profile_from_mm`` before mesh construction.
+4. Build closed vessel walls using ``create_hollow_revolved_mesh`` and verify
+   capacity with ``profile_capacity_ml``.
+5. Add volumetrically correct markings with ``add_volume_graduations``.
+6. Add floor, camera, and lights; optionally call ``enable_freestyle_outline``
+   for a diagnostic silhouette overlay.
+7. Render multiple views with ``render_views`` and save with ``save_blend``.
+
+Profile smoothing changes the geometric profile and therefore capacity. Always
+compute graduations from the same *smoothed inner profile* used to build the
+mesh. Keep intentionally sharp rim/base/joint control points in ``sharp_indices``.
 """
 
 from __future__ import annotations
@@ -22,6 +40,12 @@ from mathutils import Vector
 
 @dataclass(frozen=True)
 class ProfilePoint:
+    """One radius-height control point of an axisymmetric vessel profile.
+
+    ``radius`` and ``z`` are in metres. ``deform_weight`` controls how strongly
+    an optional angular deformer affects this ring (0 = none, 1 = full effect).
+    """
+
     radius: float
     z: float
     deform_weight: float = 0.0
@@ -29,6 +53,8 @@ class ProfilePoint:
 
 @dataclass(frozen=True)
 class GraduationStyle:
+    """Appearance and placement settings for curved ticks and wrapped labels."""
+
     end_angle_deg: float = -34.0
     major_length: float = 0.016
     minor_length: float = 0.008
@@ -47,6 +73,8 @@ class GraduationStyle:
 
 @dataclass(frozen=True)
 class RenderView:
+    """One orbit-camera diagnostic view around a target point."""
+
     name: str
     azimuth_deg: float
     elevation_deg: float
@@ -58,14 +86,20 @@ RingDeformer = Callable[[float, float, float, float], tuple[float, float]]
 
 
 def mm(value: float) -> float:
+    """Convert millimetres to Blender metres."""
+
     return value / 1000.0
 
 
 def ml_to_m3(value_ml: float) -> float:
+    """Convert millilitres to cubic metres."""
+
     return value_ml * 1e-6
 
 
 def m3_to_ml(value_m3: float) -> float:
+    """Convert cubic metres to millilitres."""
+
     return value_m3 * 1e6
 
 
@@ -91,6 +125,13 @@ def _positive_whole_ml(value: int | float, *, name: str) -> int:
 
 
 def profile_from_mm(rows: Iterable[Sequence[float]]) -> list[ProfilePoint]:
+    """Create and validate a profile from ``(radius_mm, z_mm[, weight])`` rows.
+
+    Rows must be ordered by strictly increasing height. This function preserves
+    the control points exactly; use ``smooth_profile_from_mm`` when a densified,
+    smoothly interpolated contour is desired.
+    """
+
     points: list[ProfilePoint] = []
     for row in rows:
         if len(row) == 2:
@@ -106,6 +147,8 @@ def profile_from_mm(rows: Iterable[Sequence[float]]) -> list[ProfilePoint]:
 
 
 def validate_profile(profile: Sequence[ProfilePoint]) -> None:
+    """Raise a clear error unless a profile has positive radii and increasing z."""
+
     if len(profile) < 2:
         raise ValueError("A profile requires at least two points.")
     previous_z = -math.inf
@@ -117,7 +160,185 @@ def validate_profile(profile: Sequence[ProfilePoint]) -> None:
         previous_z = point.z
 
 
+def _pchip_slopes(xs: Sequence[float], ys: Sequence[float]) -> list[float]:
+    """Compute shape-preserving cubic Hermite slopes for ordered samples."""
+
+    count = len(xs)
+    if count != len(ys):
+        raise ValueError("xs and ys must have the same length.")
+    if count < 2:
+        raise ValueError("At least two samples are required.")
+    if count == 2:
+        slope = (ys[1] - ys[0]) / (xs[1] - xs[0])
+        return [slope, slope]
+
+    intervals = [xs[index + 1] - xs[index] for index in range(count - 1)]
+    secants = [
+        (ys[index + 1] - ys[index]) / intervals[index]
+        for index in range(count - 1)
+    ]
+    slopes = [0.0] * count
+
+    for index in range(1, count - 1):
+        previous = secants[index - 1]
+        following = secants[index]
+        if previous == 0.0 or following == 0.0 or previous * following < 0.0:
+            slopes[index] = 0.0
+            continue
+        left_weight = 2.0 * intervals[index] + intervals[index - 1]
+        right_weight = intervals[index] + 2.0 * intervals[index - 1]
+        slopes[index] = (left_weight + right_weight) / (
+            left_weight / previous + right_weight / following
+        )
+
+    def endpoint_slope(
+        first_interval: float,
+        second_interval: float,
+        first_secant: float,
+        second_secant: float,
+    ) -> float:
+        slope = (
+            (2.0 * first_interval + second_interval) * first_secant
+            - first_interval * second_secant
+        ) / (first_interval + second_interval)
+        if slope * first_secant <= 0.0:
+            return 0.0
+        if first_secant * second_secant < 0.0 and abs(slope) > 3.0 * abs(first_secant):
+            return 3.0 * first_secant
+        return slope
+
+    slopes[0] = endpoint_slope(
+        intervals[0], intervals[1], secants[0], secants[1]
+    )
+    slopes[-1] = endpoint_slope(
+        intervals[-1], intervals[-2], secants[-1], secants[-2]
+    )
+    return slopes
+
+
+def _cubic_hermite(
+    y0: float,
+    y1: float,
+    slope0: float,
+    slope1: float,
+    interval: float,
+    t: float,
+) -> float:
+    """Evaluate one cubic Hermite segment at normalized position ``t``."""
+
+    t2 = t * t
+    t3 = t2 * t
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+    h10 = t3 - 2.0 * t2 + t
+    h01 = -2.0 * t3 + 3.0 * t2
+    h11 = t3 - t2
+    return (
+        h00 * y0
+        + h10 * interval * slope0
+        + h01 * y1
+        + h11 * interval * slope1
+    )
+
+
+def smooth_profile(
+    profile: Sequence[ProfilePoint],
+    samples_per_segment: int = 8,
+    sharp_indices: Iterable[int] = (),
+) -> list[ProfilePoint]:
+    """Densify a profile with shape-preserving smooth interpolation.
+
+    Radius and deformation weight are interpolated as functions of height using
+    monotone piecewise cubic Hermite interpolation (PCHIP). It avoids the large
+    overshoots of unconstrained Catmull-Rom splines and is therefore suitable for
+    vessel shoulders, bellies, and neck transitions.
+
+    ``samples_per_segment`` is the number of subsegments generated between each
+    pair of controls. ``sharp_indices`` contains control-point indices whose
+    adjacent segments must remain linear, preserving intentional corners such as
+    a flat base transition, rim, flange, or ground-glass joint.
+
+    The returned profile includes every original control point and is ready for
+    ``create_hollow_revolved_mesh`` and all volume/graduation helpers. Always use
+    the same smoothed inner profile for capacity and graduation calculations.
+    """
+
+    validate_profile(profile)
+    if isinstance(samples_per_segment, bool) or samples_per_segment < 1:
+        raise ValueError("samples_per_segment must be a positive integer.")
+    samples_per_segment = int(samples_per_segment)
+
+    sharp = {int(index) for index in sharp_indices}
+    invalid = sorted(index for index in sharp if index < 0 or index >= len(profile))
+    if invalid:
+        raise ValueError(f"sharp_indices contains invalid indices: {invalid}")
+
+    heights = [point.z for point in profile]
+    radii = [point.radius for point in profile]
+    weights = [point.deform_weight for point in profile]
+    radius_slopes = _pchip_slopes(heights, radii)
+    weight_slopes = _pchip_slopes(heights, weights)
+
+    result: list[ProfilePoint] = []
+    for segment_index, (lower, upper) in enumerate(zip(profile[:-1], profile[1:])):
+        interval = upper.z - lower.z
+        keep_linear = segment_index in sharp or (segment_index + 1) in sharp
+        for sample_index in range(samples_per_segment):
+            t = sample_index / samples_per_segment
+            z = lower.z + interval * t
+            if keep_linear:
+                radius = lower.radius + (upper.radius - lower.radius) * t
+                weight = lower.deform_weight + (
+                    upper.deform_weight - lower.deform_weight
+                ) * t
+            else:
+                radius = _cubic_hermite(
+                    lower.radius,
+                    upper.radius,
+                    radius_slopes[segment_index],
+                    radius_slopes[segment_index + 1],
+                    interval,
+                    t,
+                )
+                weight = _cubic_hermite(
+                    lower.deform_weight,
+                    upper.deform_weight,
+                    weight_slopes[segment_index],
+                    weight_slopes[segment_index + 1],
+                    interval,
+                    t,
+                )
+            result.append(ProfilePoint(radius=max(radius, 1e-12), z=z, deform_weight=weight))
+
+    result.append(profile[-1])
+    validate_profile(result)
+    return result
+
+
+def smooth_profile_from_mm(
+    rows: Iterable[Sequence[float]],
+    samples_per_segment: int = 8,
+    sharp_indices: Iterable[int] = (),
+) -> list[ProfilePoint]:
+    """Create a millimetre profile and immediately smooth/densify it.
+
+    This convenience wrapper is equivalent to
+    ``smooth_profile(profile_from_mm(rows), ...)``.
+    """
+
+    return smooth_profile(
+        profile_from_mm(rows),
+        samples_per_segment=samples_per_segment,
+        sharp_indices=sharp_indices,
+    )
+
+
 def clear_scene() -> None:
+    """Delete scene objects/collections and purge unused core data blocks.
+
+    Call this once at the beginning of a generated script to avoid inheriting
+    objects from the startup file. The function safely leaves Edit Mode first.
+    """
+
     if bpy.context.object and bpy.context.object.mode != "OBJECT":
         bpy.ops.object.mode_set(mode="OBJECT")
 
@@ -140,23 +361,35 @@ def clear_scene() -> None:
 
 
 def create_collection(name: str) -> bpy.types.Collection:
+    """Create a new collection linked directly under the active scene."""
+
     collection = bpy.data.collections.new(name)
     bpy.context.scene.collection.children.link(collection)
     return collection
 
 
 def select_only(obj: bpy.types.Object) -> None:
+    """Make exactly one object selected and active for deterministic operators."""
+
     bpy.ops.object.select_all(action="DESELECT")
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
 
 
 def assign_metadata(obj: bpy.types.Object, metadata: Mapping[str, object]) -> None:
+    """Store simple custom properties on an asset object for downstream indexing."""
+
     for key, value in metadata.items():
         obj[key] = value
 
 
 def sample_profile(profile: Sequence[ProfilePoint], z: float) -> ProfilePoint:
+    """Linearly sample radius and deformation weight at height ``z``.
+
+    Heights outside the profile are clamped to the nearest endpoint. A smoothed
+    profile should already be densified before calling this helper.
+    """
+
     validate_profile(profile)
     if z <= profile[0].z:
         return profile[0]
@@ -178,6 +411,8 @@ def sample_profile(profile: Sequence[ProfilePoint], z: float) -> ProfilePoint:
 
 
 def frustum_segment_volume_m3(lower: ProfilePoint, upper: ProfilePoint) -> float:
+    """Return the exact volume of one linear-radius frustum segment."""
+
     height = upper.z - lower.z
     return (
         math.pi
@@ -196,6 +431,8 @@ def _partial_segment_volume_m3(
     upper: ProfilePoint,
     local_height: float,
 ) -> float:
+    """Return volume from a segment's lower point up to ``local_height``."""
+
     segment_height = upper.z - lower.z
     x = min(max(local_height, 0.0), segment_height)
     slope = (upper.radius - lower.radius) / segment_height
@@ -207,6 +444,8 @@ def _partial_segment_volume_m3(
 
 
 def profile_capacity_m3(profile: Sequence[ProfilePoint]) -> float:
+    """Integrate the full piecewise-frustum capacity in cubic metres."""
+
     validate_profile(profile)
     return sum(
         frustum_segment_volume_m3(lower, upper)
@@ -215,10 +454,14 @@ def profile_capacity_m3(profile: Sequence[ProfilePoint]) -> float:
 
 
 def profile_capacity_ml(profile: Sequence[ProfilePoint]) -> float:
+    """Integrate the full piecewise-frustum capacity in millilitres."""
+
     return m3_to_ml(profile_capacity_m3(profile))
 
 
 def volume_below_height_m3(profile: Sequence[ProfilePoint], z: float) -> float:
+    """Integrate profile volume from the bottom through world height ``z``."""
+
     validate_profile(profile)
     if z <= profile[0].z:
         return 0.0
@@ -288,6 +531,12 @@ def graduation_levels(
     interval_ml: int | float,
     top_clearance: float = 0.0,
 ) -> list[tuple[int, float]]:
+    """Return ``(millilitres, z)`` pairs for equal-volume graduation marks.
+
+    Values are found by inverting integrated inner-profile volume, so tapered
+    vessels correctly produce non-uniform vertical tick spacing.
+    """
+
     maximum_volume_ml = _positive_whole_ml(
         maximum_volume_ml,
         name="maximum_volume_ml",
@@ -307,10 +556,14 @@ def graduation_levels(
 
 
 def angular_difference(angle: float, center: float) -> float:
+    """Return the wrapped signed angular difference in ``[-pi, pi]``."""
+
     return math.atan2(math.sin(angle - center), math.cos(angle - center))
 
 
 def cosine_lobe(theta: float, center: float, half_width: float) -> float:
+    """Return a smooth 0..1 angular influence lobe around ``center``."""
+
     distance = abs(angular_difference(theta, center))
     if distance >= half_width:
         return 0.0
@@ -324,6 +577,12 @@ def make_angular_deformer(
     radial_extension: float,
     vertical_rise: float = 0.0,
 ) -> RingDeformer:
+    """Create a smooth local ring deformer, typically for a pouring spout.
+
+    The profile point's ``deform_weight`` scales radial extension and optional
+    vertical rise, allowing deformation to grow only near the vessel rim.
+    """
+
     center = math.radians(center_deg)
     half_width = math.radians(half_width_deg)
 
@@ -340,6 +599,8 @@ def identity_deformer(
     z: float,
     weight: float,
 ) -> tuple[float, float]:
+    """Return unchanged radius/height; default when no angular deformation exists."""
+
     del theta, weight
     return radius, z
 
@@ -350,6 +611,8 @@ def surface_point_at(
     theta: float,
     deformer: RingDeformer | None = None,
 ) -> tuple[float, float]:
+    """Return deformed surface ``(radius, z)`` at a height and polar angle."""
+
     sample = sample_profile(outer_profile, z)
     transform = deformer or identity_deformer
     return transform(theta, sample.radius, sample.z, sample.deform_weight)
@@ -361,6 +624,8 @@ def surface_radius_at(
     theta: float,
     deformer: RingDeformer | None = None,
 ) -> float:
+    """Return only the deformed surface radius at a height and polar angle."""
+
     radius, _ = surface_point_at(outer_profile, z, theta, deformer)
     return radius
 
@@ -371,6 +636,8 @@ def _add_profile_ring(
     radial_segments: int,
     deformer: RingDeformer,
 ) -> list[int]:
+    """Append one deformed circular vertex ring and return its vertex indices."""
+
     indices: list[int] = []
     for index in range(radial_segments):
         theta = 2.0 * math.pi * index / radial_segments
@@ -386,6 +653,8 @@ def _connect_rings(
     upper: Sequence[int],
     inward: bool,
 ) -> None:
+    """Append quad faces between equal-length rings with requested winding."""
+
     count = len(lower)
     for index in range(count):
         nxt = (index + 1) % count
@@ -475,6 +744,8 @@ def _new_principled_material(
     base_color: tuple[float, float, float, float],
     roughness: float,
 ) -> bpy.types.Material:
+    """Create a minimal Principled BSDF material with color and roughness."""
+
     material = bpy.data.materials.new(name)
     material.use_nodes = True
     nodes = material.node_tree.nodes
@@ -558,21 +829,29 @@ def create_borosilicate_glass_material(
 
 
 def create_marking_material(name: str = "MAT_Graduation_White") -> bpy.types.Material:
+    """Create the slightly rough white material used for ticks and labels."""
+
     return _new_principled_material(name, (0.92, 0.94, 0.97, 1.0), 0.28)
 
 
 def create_floor_material(name: str = "MAT_Studio_Floor") -> bpy.types.Material:
+    """Create a dark, rough studio-floor material that reveals glass silhouettes."""
+
     # A rough mid-dark floor avoids a white specular wash while preserving
     # enough background contrast to reveal the silhouette of clear glass.
     return _new_principled_material(name, (0.20, 0.205, 0.215, 1.0), 0.93)
 
 
 def create_minor_grid_material(name: str = "MAT_Studio_Grid_Minor") -> bpy.types.Material:
+    """Create a shadeless material for thin reference-grid lines."""
+
     # Emission strength 1 makes the grid camera-visible and independent of lamps.
     return _new_emission_material(name, (0.050, 0.058, 0.072, 1.0), 0.82)
 
 
 def create_major_grid_material(name: str = "MAT_Studio_Grid_Major") -> bpy.types.Material:
+    """Create a darker shadeless material for major reference-grid lines."""
+
     return _new_emission_material(name, (0.016, 0.020, 0.030, 1.0), 0.92)
 
 
@@ -583,6 +862,8 @@ def create_curve_polyline(
     material: bpy.types.Material,
     collection: bpy.types.Collection,
 ) -> bpy.types.Object:
+    """Create a bevelled 3D polyline curve through explicit world-space points."""
+
     curve_data = bpy.data.curves.new(name=f"{name}_Curve", type="CURVE")
     curve_data.dimensions = "3D"
     curve_data.fill_mode = "FULL"
@@ -652,6 +933,8 @@ def _font_curve_to_mesh(
     style: GraduationStyle,
     collection: bpy.types.Collection,
 ) -> bpy.types.Object:
+    """Create text as a curve, evaluate it, and return a standalone mesh object."""
+
     text_data = bpy.data.curves.new(name=f"{name}_Font", type="FONT")
     text_data.body = text
     text_data.align_x = "LEFT"
@@ -678,6 +961,8 @@ def _font_curve_to_mesh(
 
 
 def _subdivide_label_mesh(mesh: bpy.types.Mesh, cuts: int) -> None:
+    """Triangulate and subdivide text so it can wrap smoothly onto a surface."""
+
     if cuts <= 0:
         return
 
@@ -832,6 +1117,8 @@ def _create_plane_object(
     material: bpy.types.Material,
     collection: bpy.types.Collection,
 ) -> bpy.types.Object:
+    """Create a square horizontal plane with one assigned material."""
+
     half = size / 2.0
     mesh = bpy.data.meshes.new(f"{name}_Mesh")
     mesh.from_pydata(
@@ -1016,12 +1303,104 @@ def configure_scene(
     return scene
 
 
+def enable_freestyle_outline(
+    thickness_px: float = 1.25,
+    color: tuple[float, float, float, float] = (0.025, 0.025, 0.030, 0.90),
+    include_open_borders: bool = True,
+    include_creases: bool = False,
+    line_set_name: str = "Diagnostic_Outline",
+    view_layer: bpy.types.ViewLayer | None = None,
+) -> bpy.types.FreestyleLineSet:
+    """Overlay a camera-space Freestyle outline on Eevee/Cycles renders.
+
+    This is intended as a *diagnostic visibility aid* for transparent or weakly
+    reflective instruments. By default it selects visible silhouettes plus open
+    mesh borders, while excluding creases/material boundaries that would clutter
+    laboratory glassware. Set ``include_creases=True`` only when hard mechanical
+    edges must also be emphasized.
+
+    Freestyle changes only the rendered line overlay; it does not repair or alter
+    geometry. Do not use it to conceal incorrect proportions or topology. For a
+    clean beauty render, simply omit this call.
+    """
+
+    if thickness_px <= 0.0:
+        raise ValueError("thickness_px must be positive.")
+    if len(color) != 4 or any(channel < 0.0 or channel > 1.0 for channel in color):
+        raise ValueError("color must be an RGBA tuple with values in [0, 1].")
+
+    scene = bpy.context.scene
+    layer = view_layer or bpy.context.view_layer
+    layer.use_freestyle = True
+    if hasattr(scene.render, "line_thickness_mode"):
+        scene.render.line_thickness_mode = "ABSOLUTE"
+    if hasattr(scene.render, "line_thickness"):
+        scene.render.line_thickness = 1.0
+
+    settings = layer.freestyle_settings
+    if hasattr(settings, "mode"):
+        settings.mode = "EDITOR"
+
+    line_set = settings.linesets.get(line_set_name)
+    if line_set is None:
+        if len(settings.linesets):
+            line_set = settings.linesets[0]
+            line_set.name = line_set_name
+        else:
+            line_set = settings.linesets.new(line_set_name)
+
+    # Keep only one active diagnostic line set when the API exposes show_render.
+    for candidate in settings.linesets:
+        if hasattr(candidate, "show_render"):
+            candidate.show_render = candidate == line_set
+
+    if hasattr(line_set, "select_by_edge_types"):
+        line_set.select_by_edge_types = True
+    edge_flags = (
+        "select_silhouette",
+        "select_border",
+        "select_crease",
+        "select_contour",
+        "select_external_contour",
+        "select_suggestive_contour",
+        "select_ridge_valley",
+        "select_material_boundary",
+        "select_edge_mark",
+    )
+    for attribute in edge_flags:
+        if hasattr(line_set, attribute):
+            setattr(line_set, attribute, False)
+    line_set.select_silhouette = True
+    if hasattr(line_set, "select_border"):
+        line_set.select_border = include_open_borders
+    if hasattr(line_set, "select_crease"):
+        line_set.select_crease = include_creases
+    if hasattr(line_set, "select_by_visibility"):
+        line_set.select_by_visibility = True
+    if hasattr(line_set, "visibility"):
+        line_set.visibility = "VISIBLE"
+
+    style = line_set.linestyle
+    style.color = color[:3]
+    style.alpha = color[3]
+    style.thickness = thickness_px
+    if hasattr(style, "thickness_position"):
+        style.thickness_position = "INSIDE"
+    if hasattr(style, "use_chaining"):
+        style.use_chaining = True
+    if hasattr(style, "caps"):
+        style.caps = "ROUND"
+    return line_set
+
+
 def look_at(
     obj: bpy.types.Object,
     target: Vector,
     track_axis: str = "-Z",
     up_axis: str = "Y",
 ) -> None:
+    """Rotate an object so its tracking axis points at ``target``."""
+
     direction = target - obj.location
     obj.rotation_euler = direction.to_track_quat(track_axis, up_axis).to_euler()
 
@@ -1030,6 +1409,8 @@ def create_camera(
     collection: bpy.types.Collection,
     name: str = "Product_Camera",
 ) -> bpy.types.Object:
+    """Create, link, and activate a perspective product camera."""
+
     camera_data = bpy.data.cameras.new(name)
     camera_data.sensor_width = 36.0
     camera_data.clip_start = 0.01
@@ -1050,6 +1431,8 @@ def create_area_light(
     shape: str = "RECTANGLE",
     size_y: float | None = None,
 ) -> bpy.types.Object:
+    """Create an aimed area light with explicit world-space dimensions."""
+
     light_data = bpy.data.lights.new(name=name, type="AREA")
     light_data.energy = energy
     light_data.shape = shape
@@ -1129,6 +1512,8 @@ def setup_glass_product_lighting(
 
 
 def orbit_location(target: Vector, view: RenderView) -> Vector:
+    """Convert an orbit-view description into a camera world location."""
+
     azimuth = math.radians(view.azimuth_deg)
     elevation = math.radians(view.elevation_deg)
     horizontal = view.distance * math.cos(elevation)
@@ -1148,6 +1533,8 @@ def render_views(
     output_directory: str | Path,
     filename_prefix: str,
 ) -> list[Path]:
+    """Render each diagnostic orbit view to PNG and return the output paths."""
+
     output_directory = Path(output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
     scene = bpy.context.scene
@@ -1167,6 +1554,8 @@ def render_views(
 
 
 def save_blend(filepath: str | Path) -> Path:
+    """Save the current Blender scene to an absolute or relative ``.blend`` path."""
+
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(path))

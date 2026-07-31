@@ -8,7 +8,13 @@ from rich.console import Console
 
 from .blender_runner import BlenderRunner
 from .code_writer import CodeWriter
-from .models import AppConfig, InstrumentSpec, IterationRecord, RunManifest
+from .models import (
+    AppConfig,
+    HistoricalVisualIssue,
+    InstrumentSpec,
+    IterationRecord,
+    RunManifest,
+)
 from .utils import sha256_file, utc_run_id, write_json
 from .vision_coding_agent import VisionCodeDecision, VisionCodingAgent
 
@@ -38,6 +44,7 @@ class AssetGenerationOrchestrator:
         manifest_path = run_dir / "manifest.json"
         write_json(run_dir / "spec.json", spec)
         write_json(manifest_path, manifest)
+        write_json(run_dir / "issue_history.json", [])
 
         self.console.print(f"[cyan]Run created[/cyan]: {run_dir}")
         protected = self._snapshot_protected_files()
@@ -187,6 +194,7 @@ class AssetGenerationOrchestrator:
                         self._record_script_path(run_dir, last),
                         last.render.images,
                         last.iteration,
+                        issue_history=self._collect_issue_history(manifest),
                     )
                     self._save_decision(run_dir, manifest, last, decision)
                     self._print_review(decision.review)
@@ -207,6 +215,7 @@ class AssetGenerationOrchestrator:
                         self._record_script_path(run_dir, last),
                         last.iteration,
                         last.render.error_summary or "Unknown Blender failure",
+                        issue_history=self._collect_issue_history(manifest),
                     )
                     candidate_path.write_text(repair.script.rstrip() + "\n", encoding="utf-8")
                     writer_summary = repair.summary
@@ -322,6 +331,7 @@ class AssetGenerationOrchestrator:
                     script_snapshot,
                     iteration,
                     render.error_summary or "Unknown Blender failure",
+                    issue_history=self._collect_issue_history(manifest),
                 )
                 candidate_path.write_text(repair.script.rstrip() + "\n", encoding="utf-8")
                 writer_summary = repair.summary
@@ -343,6 +353,7 @@ class AssetGenerationOrchestrator:
                 script_snapshot,
                 render.images,
                 iteration,
+                issue_history=self._collect_issue_history(manifest),
             )
             self._save_decision(run_dir, manifest, record, decision)
             self._print_review(decision.review)
@@ -387,6 +398,10 @@ class AssetGenerationOrchestrator:
                 decision.revised_script.rstrip() + "\n", encoding="utf-8"
             )
         write_json(run_dir / "manifest.json", manifest)
+        write_json(
+            run_dir / "issue_history.json",
+            [item.model_dump(mode="json") for item in self._collect_issue_history(manifest)],
+        )
 
     def _finalize_passed(
         self,
@@ -475,6 +490,31 @@ class AssetGenerationOrchestrator:
 
     def _review_passes(self, review) -> bool:
         return review.verdict == "pass" and review.overall_score >= self.config.loop.pass_score
+
+    @staticmethod
+    def _collect_issue_history(manifest: RunManifest) -> list[HistoricalVisualIssue]:
+        """Return every prior moderate-or-higher issue in chronological order.
+        ``VisualIssue`` currently permits only moderate, major, and
+        critical severities, so every stored review issue belongs in memory.
+        Iteration and issue indices make repeated or recurring observations
+        distinguishable without mutating the original reviews.
+        """
+        remembered_severities = {"moderate", "major", "critical"}
+        history: list[HistoricalVisualIssue] = []
+        for record in manifest.iterations:
+            if record.review is None:
+                continue
+            for issue_index, issue in enumerate(record.review.issues, start=1):
+                if issue.severity not in remembered_severities:
+                    continue
+                history.append(
+                    HistoricalVisualIssue(
+                        iteration=record.iteration,
+                        issue_index=issue_index,
+                        **issue.model_dump(),
+                    )
+                )
+        return history
 
     def _print_review(self, review) -> None:
         self.console.print(

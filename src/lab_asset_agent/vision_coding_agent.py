@@ -11,7 +11,7 @@ from pathlib import Path
 from PIL import Image
 
 from .code_writer import CodeWriter
-from .models import AppConfig, InstrumentSpec, VLMReview
+from .models import AppConfig, HistoricalVisualIssue, InstrumentSpec, VLMReview
 from .openai_compatible import OpenAICompatibleClient
 from .utils import extract_json_object
 
@@ -26,15 +26,22 @@ REVIEW_SYSTEM_PROMPT = (
 1. a visual QA engineer for procedurally generated laboratory instruments; and
 2. an expert Blender 5.2 Python engineer who can directly repair the exact script that produced the renders.
 
-Judge all supplied views jointly against the target specification and the exact current script. Geometry,
-proportions, openings, rims, wall thickness, side parts, graduations, and correct geometry matter more
-than dramatic photorealism. Do not invent unseen defects. Do not hide geometry defects by changing only camera,
-lighting, exposure, or background.
+Judge all supplied views jointly against the target specification and the exact current script. Evaluate
+geometric and structural correctness: proportions, silhouette, openings, rims, wall thickness, side parts,
+connections, graduations, and topology. Do not invent unseen defects.
 
-Graduations: verify from the code, not just by visual inspection.
-Ensure in the code that the graduations are derived from volume integration.
-For vessels with non-uniform cross-sections, non-uniform spacing is normal.
-Focus on errors such as ticks detaching or floating off the surface, overlapping labels or missing marks.
+IMPORTANT Photometric Ignore Policy:
+- Do not report, score, or revise merely because a render is dark, has weak reflections/highlights,
+  has low apparent transparency, or has imperfect exposure/contrast/shadows. Treat those as environment-lighting
+  artifacts rather than asset defects.
+- Do not change lighting, exposure, world strength, background, camera, or glass roughness only to make the image
+  prettier. If the geometry is readable in the supplied views, judge geometry only.
+
+About Graduations: 
+- verify from the code, not just by visual inspection.
+- Ensure in the code that the graduations are derived from volume integration.
+- For vessels with non-uniform cross-sections, non-uniform spacing is normal.
+- Focus on errors such as ticks detaching or floating off the surface, overlapping labels or missing marks.
 
 Return plain text with these tags and no Markdown fences:
 
@@ -129,6 +136,7 @@ class VisionCodingAgent:
         script_path: Path,
         images: list[Path],
         iteration: int,
+        issue_history: list[HistoricalVisualIssue] | None = None,
     ) -> VisionCodeDecision:
         selected = self._select_images(images)
         content: list[dict] = [
@@ -139,6 +147,7 @@ class VisionCodingAgent:
                     script=script_path.read_text(encoding="utf-8"),
                     images=selected,
                     iteration=iteration,
+                    issue_history=issue_history or [],
                 ),
             }
         ]
@@ -176,6 +185,7 @@ class VisionCodingAgent:
         script_path: Path,
         iteration: int,
         error: str,
+        issue_history: list[HistoricalVisualIssue] | None = None,
     ) -> ScriptRepair:
         prompt = f"""The current script failed deterministic validation or Blender execution at iteration
 {iteration}. There are no useful render images, so diagnose the code and log directly.
@@ -184,6 +194,8 @@ TARGET SPEC:
 {json.dumps(spec.model_dump(mode='json'), ensure_ascii=False, indent=2)}
 
 {self._shared_context()}
+
+{self._issue_history_context(issue_history or [])}
 
 CURRENT EXACT SCRIPT:
 ```python
@@ -267,6 +279,7 @@ Make the smallest robust fix and preserve correct geometry.
         script: str,
         images: list[Path],
         iteration: int,
+        issue_history: list[HistoricalVisualIssue],
     ) -> str:
         return f"""Iteration: {iteration}
 Image order / view filenames: {[path.name for path in images]}
@@ -277,6 +290,8 @@ TARGET SPECIFICATION:
 
 {self._shared_context()}
 
+{self._issue_history_context(issue_history)}
+
 CURRENT EXACT INSTRUMENT SCRIPT THAT PRODUCED THESE IMAGES:
 ```python
 {script}
@@ -285,7 +300,35 @@ CURRENT EXACT INSTRUMENT SCRIPT THAT PRODUCED THESE IMAGES:
 Evaluate both the renders and the code. If the asset genuinely passes, return verdict=pass and no script.
 If it needs any revision, return verdict=revise and directly produce the complete corrected script in the same
 response. Trace each important visual defect to likely parameters or geometry in the current script. Preserve
-already-correct features and address critical/major geometry issues before cosmetic rendering issues.
+already-correct features, prioritize higher-severity geometry defects, and ignore cosmetic photometric issues.
+"""
+
+    @staticmethod
+    def _issue_history_context(issue_history: list[HistoricalVisualIssue]) -> str:
+        """Serialize prior moderate-or-higher issues as a regression checklist.
+
+        Historical issues are evidence of what went wrong before, not proof that
+        the current script still has the defect. The model must verify each item
+        against the current code/renders while avoiding regressions.
+        """
+
+        if not issue_history:
+            payload = "[]"
+        else:
+            payload = json.dumps(
+                [item.model_dump(mode="json") for item in issue_history],
+                ensure_ascii=False,
+                indent=2,
+            )
+        return f"""PRIOR MODERATE-OR-HIGHER ISSUE HISTORY (REGRESSION MEMORY):
+{payload}
+
+Use this complete history as a regression checklist:
+- Verify each historical issue against the current exact script and current renders; do not blindly repeat it.
+- Preserve fixes that are already correct and do not reintroduce previously reported defects.
+- If a historical issue recurs, explicitly address its likely code cause in the next script.
+- Historical comments about darkness, weak reflections/highlights, exposure, or other environment lighting are
+  non-actionable under the photometric ignore policy and must not drive revisions.
 """
 
     def _shared_context(self) -> str:

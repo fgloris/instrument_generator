@@ -1,4 +1,4 @@
-# Lab Asset Agent v0.3.1
+# Lab Asset Agent v0.3.2
 
 一个在本地驱动 Blender 5.2、通过 OpenAI-compatible API 迭代生成实验室仪器 3D 资产的轻量 agent。
 
@@ -35,6 +35,10 @@ GPT-4o：规格 + 工具代码 + 当前代码 + 多视角图片
 - **初始模型可比较。** `initial_generator: deepseek` 使用 DeepSeek 生成第一版；改为 `gpt` 时，第一版也由 GPT 生成。
 - **后续只有一个决策模型。** 首轮渲染之后，不再把 GPT 的建议转交给 DeepSeek；GPT 自己看代码、看图并修改代码。
 - **精确代码—图像配对。** GPT 读取 `iteration_N/instrument.py`，即真正产生该轮图片的脚本，不会误用工作区中的其他版本。
+- **跨轮 issue 记忆。** 每次评审产生的 minor / moderate / major / critical issue 都会按时间顺序写入
+  `issue_history.json`，后续看图修订和 Blender 报错修复都会收到完整历史，用于防止旧问题回归。
+- **只评几何，不评环境光。** 黑暗、反光不明显、透明感弱、曝光和阴影等被视为环境光照现象；只要几何仍可辨认，
+  不会因此降分或修改灯光/材质。
 - **无结构化输出兼容问题。** 合并响应使用 `<REVIEW_JSON>` 和 `<BLENDER_SCRIPT>` 标签，不发送 `response_format`。
 - **实时流式输出。** 初始模型和 GPT 迭代模型都使用 `stream=True`；最终响应边生成边显示并同步写入 partial 文件。
 - **可续跑。** 已完成的初始模型调用、Blender 渲染和模型响应都会持久化，不必因中断重新生成第一版。
@@ -259,6 +263,7 @@ Endpoint rejected json_object
 
 ```text
 TARGET SPECIFICATION
+PRIOR MODERATE-OR-HIGHER ISSUE HISTORY (REGRESSION MEMORY)
 AGENT RULES
 BLENDER/PROJECT DOCUMENTATION
 REFERENCE INSTRUMENT SCRIPT
@@ -302,6 +307,7 @@ CURRENT EXACT INSTRUMENT SCRIPT THAT PRODUCED THESE IMAGES
 runs/<run-id>/
 ├── spec.json
 ├── manifest.json
+├── issue_history.json                  # 所有历史 minor 以上问题
 ├── iteration_01/
 │   ├── instrument.py                     # 产生本轮图片的精确脚本
 │   ├── render/
@@ -356,7 +362,34 @@ lab-asset-agent resume `
 
 然后直接返回完整修复脚本。
 
-## 10. 批量运行
+## 10. 新增工具：平滑轮廓与外轮廓线
+
+平滑旋转体剖面：
+
+```python
+OUTER_PROFILE = lab.smooth_profile_from_mm(
+    [(34, 0), (35, 4), (43, 55), (18, 92), (18, 110)],
+    samples_per_segment=10,
+    sharp_indices={0, 1, 4},
+)
+```
+
+该工具使用形状保持的 PCHIP 插值，适合瓶腹、肩部、颈部等连续曲面。用于内壁时，容量和刻度计算也必须使用同一份
+平滑后的 `INNER_PROFILE`。
+
+可选的诊断外轮廓：
+
+```python
+lab.enable_freestyle_outline(
+    thickness_px=1.25,
+    include_open_borders=True,
+    include_creases=False,
+)
+```
+
+它只在渲染结果上叠加 Freestyle 轮廓，不会修改 mesh，也不能替代几何修复。
+
+## 11. 批量运行
 
 ```powershell
 lab-asset-agent batch workspace/specs -c config.yaml
