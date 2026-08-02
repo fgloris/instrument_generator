@@ -13,66 +13,17 @@ from PIL import Image
 from .code_writer import CodeWriter
 from .models import AppConfig, HistoricalVisualIssue, InstrumentSpec, VLMReview
 from .openai_compatible import OpenAICompatibleClient
+from .prompts import (
+    REPAIR_SYSTEM_PROMPT,
+    REVIEW_SYSTEM_PROMPT,
+    build_human_hint_context,
+    build_issue_history_context,
+    build_repair_context,
+    build_repair_prompt,
+    build_revision_context,
+    build_review_prompt,
+)
 from .utils import extract_json_object
-
-
-_COMMON_SAFETY = """Never use network access, subprocesses, shell commands, eval, exec, or destructive filesystem
-operations. Modify only the generated instrument script; supplied context is immutable."""
-
-
-REVIEW_SYSTEM_PROMPT = (
-    """You are a visual QA engineer and Blender 5.2 Python engineer. Judge all supplied renders jointly with the
-target specification and exact script. Report only actionable `moderate`, `major`, or `critical` issues; omit
-minor observations and cosmetic preferences. Every issue must use exactly one axis:
-
-- `camera_coverage`: visibility gate. Check full-object coverage, useful angle diversity, and readable scale. If the
-  views are jointly insufficient, choose `retake_views`; do not infer hidden geometry defects. A single weak view is
-  acceptable when the others are sufficient.
-- `shape_silhouette`: most important axis. Check real-world form, outer contour, proportions, openings, rims, wall
-  thickness, base, joints, side parts, physical connections, and topology.
-- `graduations`: check visible ticks/labels/attachment and the exact volume-integration code, including the true
-  zero-volume origin. Non-uniform equal-volume spacing is normal for non-uniform vessels.
-
-Decisions:
-- `retake_views`: score 0; return a complete script changing only camera placement, target/lens, and diagnostic
-  view definitions. Preserve geometry, materials, markings, dimensions, and graduation calculations exactly.
-- `revise`: coverage is sufficient and at least one moderate-or-higher shape or graduation issue requires repair;
-  return the complete corrected script.
-- `pass`: coverage is sufficient and no moderate-or-higher defect remains.
-
-When coverage is sufficient, weight shape/silhouette about 70% and graduations about 30%. Ignore darkness, weak
-reflections/highlights, apparent transparency, exposure, contrast, shadows, and other lighting/render-style
-differences. Never change camera or rendering merely to hide a real defect.
-
-Return exactly these plain-text tags, without Markdown fences:
-
-<REVIEW_JSON>
-A valid JSON object with verdict, overall_score, issues, preserve, and summary. Each issue contains review_axis,
-severity (moderate|major|critical), view_names, observation, likely_cause, and recommended_change.
-</REVIEW_JSON>
-<BLENDER_SCRIPT>
-For revise/retake_views only: the complete executable Python file, never a patch. Omit this section for pass.
-</BLENDER_SCRIPT>
-
-"""
-    + _COMMON_SAFETY
-)
-
-
-REPAIR_SYSTEM_PROMPT = (
-    """You are a Blender 5.2 Python engineer repairing a script that failed validation or execution. Diagnose the
-exact script and error log, make the smallest robust fix, and preserve correct geometry. Return exactly:
-
-<SUMMARY>
-A concise root-cause and repair summary.
-</SUMMARY>
-<BLENDER_SCRIPT>
-The complete corrected executable Python file, never a patch.
-</BLENDER_SCRIPT>
-
-"""
-    + _COMMON_SAFETY
-)
 
 
 @dataclass
@@ -134,13 +85,19 @@ class VisionCodingAgent:
         content: list[dict] = [
             {
                 "type": "text",
-                "text": self._review_and_revision_prompt(
-                    spec=spec,
-                    script=script_path.read_text(encoding="utf-8"),
-                    images=selected,
+                "text": build_review_prompt(
                     iteration=iteration,
-                    issue_history=issue_history or [],
-                    human_hint=human_hint,
+                    view_names=[path.name for path in selected],
+                    pass_score=self.config.loop.pass_score,
+                    spec_json=json.dumps(
+                        spec.model_dump(mode="json"), ensure_ascii=False, indent=2
+                    ),
+                    revision_context=build_revision_context(
+                        rules=self.rules, docs=self.docs, toolkit=self.toolkit
+                    ),
+                    issue_history_context=build_issue_history_context(issue_history or []),
+                    human_hint_context=build_human_hint_context(human_hint),
+                    script=script_path.read_text(encoding="utf-8"),
                 ),
             }
         ]
@@ -181,30 +138,15 @@ class VisionCodingAgent:
         issue_history: list[HistoricalVisualIssue] | None = None,
         human_hint: str | None = None,
     ) -> ScriptRepair:
-        prompt = f"""The current script failed deterministic validation or Blender execution at iteration
-{iteration}. There are no useful render images, so diagnose the code and log directly.
-
-TARGET SPEC:
-{json.dumps(spec.model_dump(mode='json'), ensure_ascii=False, indent=2)}
-
-{self._repair_context()}
-
-{self._issue_history_context(issue_history or [])}
-
-{self._human_hint_context(human_hint)}
-
-CURRENT EXACT SCRIPT:
-```python
-{script_path.read_text(encoding='utf-8')}
-```
-
-FAILURE EVIDENCE:
-```
-{error}
-```
-
-Make the smallest robust fix and preserve correct geometry.
-"""
+        prompt = build_repair_prompt(
+            iteration=iteration,
+            spec_json=json.dumps(spec.model_dump(mode="json"), ensure_ascii=False, indent=2),
+            repair_context=build_repair_context(rules=self.rules, toolkit=self.toolkit),
+            issue_history_context=build_issue_history_context(issue_history or []),
+            human_hint_context=build_human_hint_context(human_hint),
+            current_script=script_path.read_text(encoding="utf-8"),
+            error=error,
+        )
         partial_path = script_path.parent / "repair_agent_response.partial.txt"
         final_response_path = script_path.parent / "repair_agent_response.txt"
         text = await asyncio.to_thread(
@@ -304,83 +246,6 @@ Make the smallest robust fix and preserve correct geometry.
             summary=summary,
             raw_response=text,
         )
-
-    def _review_and_revision_prompt(
-        self,
-        *,
-        spec: InstrumentSpec,
-        script: str,
-        images: list[Path],
-        iteration: int,
-        issue_history: list[HistoricalVisualIssue],
-        human_hint: str | None,
-    ) -> str:
-        return f"""Iteration: {iteration}
-Image order / view filenames: {[path.name for path in images]}
-Pass threshold configured by the orchestrator: {self.config.loop.pass_score}/10
-
-TARGET SPECIFICATION:
-{json.dumps(spec.model_dump(mode='json'), ensure_ascii=False, indent=2)}
-
-{self._revision_context()}
-
-{self._issue_history_context(issue_history)}
-
-{self._human_hint_context(human_hint)}
-
-CURRENT EXACT INSTRUMENT SCRIPT THAT PRODUCED THESE IMAGES:
-```python
-{script}
-```
-"""
-
-    @staticmethod
-    def _human_hint_context(human_hint: str | None) -> str:
-        if not human_hint or not human_hint.strip():
-            return "HUMAN GUIDANCE FOR THIS ITERATION:\n(none)"
-        return f"""HUMAN GUIDANCE FOR THIS ITERATION:
-{human_hint.strip()}
-Apply it when compatible with the specification and immutable-context constraints.
-"""
-
-    @staticmethod
-    def _issue_history_context(issue_history: list[HistoricalVisualIssue]) -> str:
-        """Serialize prior moderate-or-higher issues as compact regression memory."""
-
-        payload = json.dumps(
-            [item.model_dump(mode="json") for item in issue_history],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return f"""PRIOR MODERATE-OR-HIGHER ISSUES (verify; do not blindly repeat):
-{payload}
-Preserve confirmed fixes and address recurring code causes. Ignore historical photometric comments.
-"""
-
-    def _revision_context(self) -> str:
-        """Context needed for multimodal review and direct script revision."""
-
-        return f"""SCRIPT CONTRACT:
-{self.rules}
-
-BLENDER/PROJECT DOCUMENTATION:
-{self.docs}
-
-SHARED TOOLKIT:
-```python
-{self.toolkit}
-```"""
-
-    def _repair_context(self) -> str:
-        """Minimal context for deterministic validation/render failures."""
-
-        return f"""SCRIPT CONTRACT:
-{self.rules}
-
-SHARED TOOLKIT:
-```python
-{self.toolkit}
-```"""
 
     def _select_images(self, images: list[Path]) -> list[Path]:
         if not images:

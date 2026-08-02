@@ -279,7 +279,50 @@ runs/<run-id>/
 
 评审响应协议：`<REVIEW_JSON>` 内为 `verdict`（`pass` / `revise` / `retake_views`）、`overall_score`、`issues` 等；`revise` 和 `retake_views` 必须同时携带完整 `<BLENDER_SCRIPT>`。`retake_views` 只允许 `camera_coverage` 问题，且返回脚本只能修改摄像机、目标点、镜头与诊断视角。
 
-## 9. 配套工具：PDF 目录数据集提取
+## 9. Prompt 注入点
+
+所有发给模型的 prompt 集中在一个文件，统一修改只动这一个文件，无需触碰 agent 代码：
+
+```text
+src/lab_asset_agent/prompts.py
+```
+
+各 prompt 的名称、作用与注入时机如下。
+
+### 首版脚本生成（每个 run 只发生一次，generate 开始时）
+
+| Prompt | 角色 | 注入时机 |
+| --- | --- | --- |
+| `INITIAL_WRITER_SYSTEM_PROMPT` | system | 第一版脚本调用（`CodeWriter`），由 `initial_generator: deepseek/gpt` 指定的模型执行 |
+| `build_shared_context()` | user 片段 | 脚本契约 + 项目文档 + 参考脚本 + 共享工具库 |
+| `build_initial_prompt()` | user | 目标规格 + 上述上下文 + 生成脚本路径 |
+
+### 评审 + 改代码（每轮成功渲染后）
+
+| Prompt | 角色 | 注入时机 |
+| --- | --- | --- |
+| `REVIEW_SYSTEM_PROMPT` | system | 每次成功渲染后的 GPT 评审 + 改写请求（`VisionCodingAgent.review_and_revise`），要求返回 `<REVIEW_JSON>` 与完整 `<BLENDER_SCRIPT>` |
+| `build_revision_context()` | user 片段 | 脚本契约 + 项目文档 + 共享工具库 |
+| `build_issue_history_context()` | user 片段 | 此前全部 moderate / major / critical 问题的回归清单（跨轮记忆） |
+| `build_human_hint_context()` | user 片段 | 从 `--human-hint-from-iteration` 起每一轮注入的 `--human-hint` |
+| `build_review_prompt()` | user | 迭代号、视角文件名、通过阈值、规格 + 上述片段 + 产生本轮图片的精确脚本；多视角图片随后以 JPEG base64 追加 |
+
+### 渲染失败修复（静态校验或 Blender 执行失败时）
+
+| Prompt | 角色 | 注入时机 |
+| --- | --- | --- |
+| `REPAIR_SYSTEM_PROMPT` | system | 渲染失败后的修复请求（`VisionCodingAgent.repair_render_failure`），要求返回 `<SUMMARY>` 与完整 `<BLENDER_SCRIPT>` |
+| `build_repair_context()` | user 片段 | 脚本契约 + 共享工具库（不携带文档，保持最小上下文） |
+| `build_issue_history_context()` / `build_human_hint_context()` | user 片段 | 同评审流程 |
+| `build_repair_prompt()` | user | 目标规格 + 失败脚本 + Blender 错误日志 |
+
+### 共享
+
+| Prompt | 角色 | 注入时机 |
+| --- | --- | --- |
+| `COMMON_SAFETY` | system 后缀 | 追加在 `REVIEW_SYSTEM_PROMPT` 与 `REPAIR_SYSTEM_PROMPT` 末尾的安全约束 |
+
+## 10. 配套工具：PDF 目录数据集提取
 
 `desc_dataset/extract_labware_dataset_v2.py` 把产品目录 PDF 拆成图片 + 文本数据集（家庭/变体/资产三级 JSONL），依赖 `pymupdf`：
 
@@ -298,7 +341,7 @@ python desc_dataset/extract_labware_dataset_v2.py CLS-GL-001.pdf -o labware_data
 --max-pages N   调试用：最多处理 N 页
 ```
 
-## 10. 安全边界
+## 11. 安全边界
 
 生成脚本在启动 Blender 前会做 AST 静态检查，拒绝：
 
@@ -309,7 +352,7 @@ python desc_dataset/extract_labware_dataset_v2.py CLS-GL-001.pdf -o labware_data
 
 Blender 使用 `--background --factory-startup --offline-mode --python-exit-code 1`。这属于防御性限制，不等同于操作系统级沙箱，大规模运行建议使用独立用户、虚拟机或容器。
 
-## 11. 测试
+## 12. 测试
 
 ```powershell
 pytest -q

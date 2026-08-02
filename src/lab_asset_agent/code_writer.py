@@ -7,20 +7,12 @@ from pathlib import Path
 
 from .models import AppConfig, InstrumentSpec, OpenAICompatibleModelConfig
 from .openai_compatible import OpenAICompatibleClient
+from .prompts import (
+    INITIAL_WRITER_SYSTEM_PROMPT,
+    build_initial_prompt,
+    build_shared_context,
+)
 from .utils import extract_json_object
-
-
-SYSTEM_PROMPT = """You are a Blender 5.2 Python engineer. Follow the supplied script contract and return exactly:
-
-<BLENDER_SCRIPT>
-A complete executable Python file without Markdown fences.
-</BLENDER_SCRIPT>
-<SUMMARY>
-A concise design summary.
-</SUMMARY>
-
-Never return a patch or modify supplied context. Never use network access, subprocesses, shell commands, eval,
-exec, or destructive filesystem operations."""
 
 
 class CodeWriter:
@@ -63,33 +55,17 @@ class CodeWriter:
         return None
 
     async def create_initial(self, spec: InstrumentSpec, candidate_path: Path) -> str:
-        prompt = f"""Create the initial instrument-generation script for this target.
-
-TARGET SPEC:
-{json.dumps(spec.model_dump(mode='json'), ensure_ascii=False, indent=2)}
-
-{self._shared_context()}
-
-GENERATED SCRIPT PATH: {candidate_path}
-"""
+        prompt = build_initial_prompt(
+            spec_json=json.dumps(spec.model_dump(mode="json"), ensure_ascii=False, indent=2),
+            shared_context=build_shared_context(
+                rules=self.rules,
+                docs=self.docs,
+                reference=self.reference,
+                toolkit=self.toolkit,
+            ),
+            candidate_path=candidate_path,
+        )
         return await self._complete_and_write(prompt, candidate_path)
-
-    def _shared_context(self) -> str:
-        return f"""SCRIPT CONTRACT:
-{self.rules}
-
-BLENDER/PROJECT DOCUMENTATION:
-{self.docs}
-
-REFERENCE INSTRUMENT SCRIPT:
-```python
-{self.reference}
-```
-
-SHARED TOOLKIT:
-```python
-{self.toolkit}
-```"""
 
     async def _complete_and_write(self, prompt: str, candidate_path: Path) -> str:
         partial_path = candidate_path.with_suffix(".initial_response.partial.txt")
@@ -97,7 +73,7 @@ SHARED TOOLKIT:
         text = await asyncio.to_thread(
             self.client.chat,
             [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": INITIAL_WRITER_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             stream_label=f"initial generator {self.model_config.model}",
